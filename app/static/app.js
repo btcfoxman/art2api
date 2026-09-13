@@ -163,8 +163,9 @@ function openTaskDetail(task) {
   const fields = [['本地任务', task.id],['上游任务', task.upstream_id || '—'],['账号', state.accounts.find(a => a.id === task.account_id)?.name || task.account_id],['模型', task.model],['生成参数', `${task.request.duration} 秒 · ${task.request.resolution} · ${task.request.aspect_ratio}`],['状态', labels[task.internal_status] || task.internal_status],['创建 / 更新', `${stamp(task.created_at)} / ${stamp(task.updated_at)}`]];
   if (task.error) fields.push(['错误代码', task.error.code],['错误详情', task.error.message]);
   for (const record of task.media_processing || []) {
-    const spec = value => `${value.width}×${value.height} / ${(value.durationMs/1000).toFixed(3)} 秒 / ${value.fps}fps`;
-    fields.push([`参考视频 ${record.index} 适配`, `${spec(record.before)} → ${spec(record.after)}；${record.actions.join('；')}`]);
+    const audio = record.field === 'audio_urls';
+    const spec = value => audio ? `${(value.durationMs/1000).toFixed(3)} 秒` : `${value.width}×${value.height} / ${(value.durationMs/1000).toFixed(3)} 秒 / ${value.fps}fps`;
+    fields.push([`参考${audio ? '音频' : '视频'} ${record.index} ${audio ? '补齐' : '适配'}`, `${spec(record.before)} → ${spec(record.after)}；${record.actions.join('；')}`]);
   }
   $('#taskDetail').innerHTML = `<dl class="detail-grid">${fields.map(([key,value]) => `<dt>${esc(key)}</dt><dd>${esc(value)}</dd>`).join('')}</dl><p class="field-title">完整提示词</p><div class="detail-prompt">${esc(task.request.prompt)}</div><div class="detail-links media-text">${mediaButtons(task)}${safeUrl(task.content?.video_url) ? `<a href="${esc(safeUrl(task.content.video_url))}" data-result-task="${esc(task.id)}" target="_blank" rel="noopener noreferrer">生成视频 ↗</a>` : ''}</div>`;
   state.detailTask = task;

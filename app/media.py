@@ -1,4 +1,4 @@
-"""Local video preparation for Artlist modes that inherit reference geometry."""
+"""Local reference media preparation for Artlist's resolved model limits."""
 from __future__ import annotations
 
 import asyncio
@@ -23,7 +23,7 @@ async def run_media_command(*args, timeout=180):
     try:
         stdout, _ = await asyncio.wait_for(process.communicate(), timeout)
         if process.returncode:
-            raise ValueError('参考视频转换失败，请检查素材是否完整')
+            raise ValueError('参考素材转换失败，请检查素材是否完整')
         return stdout
     finally:
         if process.returncode is None:
@@ -39,6 +39,56 @@ async def probe(path):
         return json.loads(data)
     except asyncio.TimeoutError:
         raise ValueError('参考素材信息解析超时') from None
+
+
+def audio_silence_plan(assets, context):
+    """Plan two-second increments without crossing per-file or total limits."""
+    durations = [asset['metadata']['durationMs'] for asset in assets]
+    minimum = context.get('minUploadedAudioDuration', 0) or 0
+    steps = [max(0, math.ceil((minimum * 1000 - duration) / 2000)) for duration in durations]
+    total_minimum = context.get('minTotalAudioDuration', 0) or 0
+    missing = total_minimum * 1000 - sum(durations) - sum(steps) * 2000
+    maximum = context.get('maxUploadedAudioDuration', 0) or 0
+    if missing > 0 and assets:
+        remaining = math.ceil(missing / 2000)
+        for index, duration in enumerate(durations):
+            capacity = max(0, math.floor((maximum * 1000 - duration) / 2000) - steps[index]) if maximum else remaining
+            added = min(remaining, capacity)
+            steps[index] += added
+            remaining -= added
+        if remaining:
+            raise ValueError('音频无法按 2 秒静音补齐：会超过单项时长上限')
+    for index, (duration, count) in enumerate(zip(durations, steps), 1):
+        if count and maximum and duration + count * 2000 > maximum * 1000:
+            raise ValueError(f'音频 {index} 无法按 2 秒静音补齐：会超过单项 {maximum:g} 秒上限')
+    total_limit = context.get('maxTotalAudioDuration') or context.get('totalAudioInputDuration')
+    if any(steps) and total_limit and sum(durations) + sum(steps) * 2000 > total_limit * 1000:
+        raise ValueError(f'音频无法按 2 秒静音补齐：会超过总时长 {total_limit:g} 秒上限')
+    return [count * 2 for count in steps]
+
+
+async def append_audio_silence(path: Path, metadata, seconds):
+    if not seconds:
+        return path, metadata, None
+    if seconds <= 0 or seconds % 2:
+        raise ValueError('音频静音补齐必须为 2 秒的正整数倍')
+    output = path.with_name(path.stem + '-padded.wav')
+    try:
+        await run_media_command('ffmpeg', '-nostdin', '-y', '-v', 'error', '-i', str(path),
+                                '-map', '0:a:0', '-af', f'apad=pad_dur={seconds}',
+                                '-c:a', 'pcm_s16le', '-threads', '2', str(output))
+    except asyncio.TimeoutError:
+        raise ValueError('参考音频补齐静音超时') from None
+    media = await probe(output)
+    duration = round(float(media.get('format', {}).get('duration', 0)) * 1000)
+    if abs(duration - metadata['durationMs'] - seconds * 1000) > 100:
+        raise ValueError('参考音频补齐后的时长不符合要求')
+    result = {**metadata, 'fileName': output.name, 'mimeType': 'audio/wav',
+              'byteSize': output.stat().st_size, 'durationMs': duration}
+    record = {'policy': 'append_silence', 'added_seconds': seconds,
+              'before': {'durationMs': metadata['durationMs']}, 'after': {'durationMs': duration},
+              'actions': [f'末尾追加 {seconds:g} 秒静音，保留原音频内容']}
+    return output, result, record
 
 
 def reference_spec(metadata, request):

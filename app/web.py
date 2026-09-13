@@ -18,7 +18,7 @@ from jsonschema import Draft202012Validator, ValidationError
 from app.catalog import local_schema
 from app.cookies import parse_cookie_header
 from app.errors import GatewayError
-from app.media import adapt_reference_video, fps_in_range
+from app.media import adapt_reference_video, append_audio_silence, audio_silence_plan, fps_in_range
 from app.network import client, public_media_url
 from app.web_catalog import GROUPS, generation_payload, generation_result, profiles, quote_input, validate_request
 
@@ -150,7 +150,7 @@ class WebClient:
                                catalog={'source': 'web_cdp_capture', 'model_groups': [{'id': gid, 'name': live[gid]['name']} for gid in set(GROUPS.values()) if gid in live]})
         return available
 
-    async def quote(self, request, assets=None):
+    async def quote(self, request, assets=None, *, allow_short_audio=False):
         validate_request(request, profiles()[request['model']])
         payload, inputs, settings, artifacts = quote_input(request, assets or {})
         quote = await self.rpc('modelRouter.getCostQuote', payload, post=True)
@@ -173,11 +173,11 @@ class WebClient:
                 continue
         if not valid:
             raise ValueError('请求参数不符合 Artlist 当前所选子模型的定义')
-        self.validate_media(assets or {}, quote.get('modelContextConfig', {}))
+        self.validate_media(assets or {}, quote.get('modelContextConfig', {}), allow_short_audio=allow_short_audio)
         return quote, inputs, settings, artifacts
 
     @staticmethod
-    def validate_media(assets, context):
+    def validate_media(assets, context, *, allow_short_audio=False):
         for field, kind in [('image_urls','Image'), ('video_urls','Video'), ('audio_urls','Audio')]:
             values = assets.get(field, [])
             if values and context.get('isSupport'+kind+'Upload') is False:
@@ -216,10 +216,14 @@ class WebClient:
                         bounds = '、'.join(filter(None, [f'至少 {lower:g}fps' if lower else '', f'最多 {upper:g}fps' if upper else '']))
                         raise ValueError(f'Artlist 参考视频帧率不受支持：视频 {index} 为 {meta["fps"]:g}fps；要求{bounds}')
                 for key, compare in [('minUploaded'+kind+'Duration', lambda n: duration<n), ('maxUploaded'+kind+'Duration', lambda n: duration>n)]:
+                    if allow_short_audio and key == 'minUploadedAudioDuration':
+                        continue
                     if context.get(key) and compare(context[key]):
                         bound = '至少' if key.startswith('min') else '最多'
                         raise ValueError(f'Artlist 素材时长不受支持：{label} 为 {duration:g} 秒，要求{bound} {context[key]:g} 秒')
             total=sum(a['metadata'].get('durationMs',0)/1000 for a in values)
+            if kind == 'Audio' and values and not allow_short_audio and total < (context.get('minTotalAudioDuration') or 0):
+                raise ValueError(f'Artlist 音频总时长不足：当前 {total:g} 秒，要求至少 {context["minTotalAudioDuration"]:g} 秒')
             limit=context.get('maxTotal'+kind+'Duration') or context.get('total'+kind+'InputDuration')
             if limit and total>limit:
                 raise ValueError('Artlist 素材总时长超限：'+field)
@@ -230,7 +234,7 @@ class WebClient:
             if assets.get(field) and context.get(flag) is False:
                 raise ValueError('Artlist 子模型不支持首尾帧设置')
 
-    async def upload(self, url, kind, *, reference_request=None):
+    async def upload(self, url, kind, *, reference_request=None, silence_seconds=0):
         public_media_url(url)
         async with client(self.secret()['proxy_url'], max(120, self.settings.request_timeout)) as http:
             for _ in range(4):
@@ -294,11 +298,13 @@ class WebClient:
                 if kind == 'video' and reference_request is not None:
                     path, metadata, processing = await adapt_reference_video(
                         path, metadata, reference_request, self.settings.sd25_video_policy)
-                    if processing:
-                        content = bytearray(path.read_bytes())
-                        if len(content) > 150*1024*1024:
-                            raise ValueError('参考视频转换后超过 150 MiB')
-                        mime, filename = metadata['mimeType'], metadata['fileName']
+                if kind == 'audio' and silence_seconds:
+                    path, metadata, processing = await append_audio_silence(path, metadata, silence_seconds)
+                if processing:
+                    if metadata['byteSize'] > 150*1024*1024:
+                        raise ValueError('参考素材转换后超过 150 MiB')
+                    content = bytearray(path.read_bytes())
+                    mime, filename = metadata['mimeType'], metadata['fileName']
             request={'fileName':filename,'fileType':mime,'expiresIn':86400}
             request.update({k:metadata[k] for k in ('width','height') if k in metadata})
             signed=await self.rpc('uploadRouter.getPresignedUrl',request,post=True)
@@ -333,15 +339,33 @@ class WebClient:
         request=task['request']
         validate_request(request,task['profile'])
         assets={}
+        def save_processing():
+            records = [{**asset['processing'], 'field': key, 'index': index+1}
+                       for key, values in assets.items() for index, asset in enumerate(values) if asset.get('processing')]
+            if records:
+                self.db.update_task(task['id'], result={**self.db.task(task['id'])['result'], 'media_processing': records})
         for field,kind in [('image_urls','image'),('video_urls','video'),('audio_urls','audio'),('first_frame','image'),('last_frame','image')]:
             urls=request.get(field) or []
             if isinstance(urls,str):urls=[urls]
             options = {'reference_request': request} if field == 'video_urls' and task['profile']['group_id'] == 515 else {}
             assets[field]=[await self.upload(url,kind,**options) for url in urls]
-            records = [{**asset['processing'], 'field': key, 'index': index+1}
-                       for key, values in assets.items() for index, asset in enumerate(values) if asset.get('processing')]
-            if records:
-                self.db.update_task(task['id'], result={**self.db.task(task['id'])['result'], 'media_processing': records})
+            save_processing()
+        if assets.get('audio_urls'):
+            # Resolve actual per-file/total limits before padding; this quote is
+            # never submitted. Only the final quote below may authorize a job.
+            preliminary, *_ = await self.quote(request, assets, allow_short_audio=True)
+            context = preliminary.get('modelContextConfig', {})
+            plan = audio_silence_plan(assets['audio_urls'], context)
+            if any(plan) and context.get('audioFormats') and 'WAV' not in context['audioFormats']:
+                raise ValueError('Artlist 当前子模型不支持补齐后使用的 WAV 音频格式')
+            for index, seconds in enumerate(plan):
+                if seconds:
+                    # Read the exact uploaded object, not a potentially changing
+                    # caller URL. Downloads/uploads keep this account's proxy.
+                    assets['audio_urls'][index] = await self.upload(
+                        assets['audio_urls'][index]['file_url'], 'audio', silence_seconds=seconds)
+                    save_processing()
+            self.validate_media(assets, context)
         # A cold browser verification may take tens of seconds. Obtain the
         # short-lived cost signature only after normal verification completes.
         token=self.db.take_verification(task['id'])

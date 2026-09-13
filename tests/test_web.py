@@ -136,11 +136,12 @@ def test_captured_completed_response_and_pending_output_are_distinct():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('kind,mime,extension', [
-    ('image','image/png','.png'), ('video','video/mp4','.mp4'), ('audio','audio/mpeg','.mp3'),
-    ('audio','audio/wav','.wav'), ('audio','audio/x-wav','.wav'), ('audio','Audio/WAV; charset=binary','.wav'),
+@pytest.mark.parametrize('kind,mime,extension,silence_seconds', [
+    ('image','image/png','.png',0), ('video','video/mp4','.mp4',0), ('audio','audio/mpeg','.mp3',0),
+    ('audio','audio/wav','.wav',0), ('audio','audio/x-wav','.wav',0), ('audio','Audio/WAV; charset=binary','.wav',0),
+    ('audio','audio/mpeg','.wav',2),
 ])
-async def test_uploaded_media_uses_separate_get_signature_and_checks_readability(setup, kind, mime, extension):
+async def test_uploaded_media_uses_separate_get_signature_and_checks_readability(setup, kind, mime, extension, silence_seconds):
     db,settings,aid=setup
     source='https://media.example/reference'
     stored='https://artlist-prod-ai-toolkit-custom-user-uploads.s3.eu-central-1.amazonaws.com/object'
@@ -165,7 +166,9 @@ async def test_uploaded_media_uses_separate_get_signature_and_checks_readability
         if str(request.url)==source:
             return httpx.Response(200,content=b'media',headers={'content-type':mime})
         if request.method=='PUT':
-            assert str(request.url)==write_url and request.content==b'media'
+            assert str(request.url)==write_url and request.content==(b'padded-media' if silence_seconds else b'media')
+            if silence_seconds:
+                assert request.headers['content-type']=='audio/wav'
             return httpx.Response(200)
         assert str(request.url)==read_url and request.method=='GET'
         assert request.headers['range']=='bytes=0-0'
@@ -177,13 +180,19 @@ async def test_uploaded_media_uses_separate_get_signature_and_checks_readability
     probe.returncode=0
     probe.communicate.return_value=(json.dumps({'streams':[{'codec_type':'video','width':1280,'height':720,'avg_frame_rate':'24/1'}],
                                                'format':{'duration':'4.0'}}).encode(),b'')
+    async def pad(path, metadata, seconds):
+        assert path.read_bytes()==b'media' and seconds==2
+        output=path.with_suffix('.wav')
+        output.write_bytes(b'padded-media')
+        return output, {**metadata,'fileName':output.name,'mimeType':'audio/wav','byteSize':12,'durationMs':6000}, {'policy':'append_silence'}
     # Reproduce the Docker MIME database that does not register audio/wav.
-    with patch('app.web.client',factory),patch('app.web.asyncio.create_subprocess_exec',AsyncMock(return_value=probe)),patch('app.web.mimetypes.guess_extension',return_value=None):
-        asset=await WebClient(aid,db,settings).upload(source,kind)
+    with patch('app.web.client',factory),patch('app.web.asyncio.create_subprocess_exec',AsyncMock(return_value=probe)),patch('app.web.mimetypes.guess_extension',return_value=None),patch('app.web.append_audio_silence',side_effect=pad):
+        asset=await WebClient(aid,db,settings).upload(source,kind,silence_seconds=silence_seconds)
     assert asset['file_url']==read_url
     assert asset['metadata']['fileName'].endswith(extension)
     if kind=='audio':
         WebClient.validate_media({'audio_urls':[asset]}, {'audioFormats':['WAV','MP3'],'minUploadedAudioDuration':4})
+        assert asset['metadata']['durationMs']==(6000 if silence_seconds else 4000)
     request=normalize_request({'model':MODEL,'prompt':'reference test','duration':4})
     _,inputs,settings,artifacts=quote_input(request,{kind+'_urls':[asset]})
     assert inputs[kind+'_urls'][0]['fileUrl']==read_url
@@ -201,6 +210,70 @@ def test_valid_wav_extension_does_not_bypass_duration_or_format_limits():
     asset['metadata']['fileName']='unsupported.aac'
     with pytest.raises(ValueError,match='音频 1 为 AAC；允许 WAV、MP3'):
         WebClient.validate_media({'audio_urls':[asset]},context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('duration,final_minimum', [(2800, 4), (4000, 4), (2800, 6)])
+async def test_audio_preparation_pads_before_verification_and_submits_only_fresh_quote(setup, duration, final_minimum):
+    db, settings, aid = setup
+    request = normalize_request({'model': MODEL, 'prompt': 'Use @音频1', 'duration': 4,
+                                 'audio_urls': ['https://media.example/original.wav']})
+    task, _ = db.create_task(request, [(aid, profiles()[MODEL])], 'audio-padding', 10)
+    events = []
+    def asset(url, milliseconds, processing=None):
+        return {'file_key': url.rsplit('/', 1)[-1], 'file_url': url,
+                'metadata': {'fileName': 'reference.wav', 'mimeType': 'audio/wav', 'byteSize': 100, 'durationMs': milliseconds},
+                **({'processing': processing} if processing else {})}
+    async def upload(url, kind, **options):
+        events.append(('upload', url))
+        if url == request['audio_urls'][0]:
+            assert not options
+            return asset('https://storage.example/original.wav', duration)
+        assert url == 'https://storage.example/original.wav' and options == {'silence_seconds': 2}
+        return asset('https://storage.example/padded.wav', 4800,
+                     {'policy': 'append_silence', 'added_seconds': 2, 'before': {'durationMs': duration},
+                      'after': {'durationMs': 4800}, 'actions': ['末尾追加 2 秒静音']})
+    async def verification(_):
+        events.append(('verification', None))
+        return {'token': 'fresh-verification'}
+    quotes = []
+    async def rpc(name, value=None, **kwargs):
+        if name == 'modelRouter.getCostQuote':
+            quotes.append(value)
+            events.append(('quote', len(quotes)))
+            return {'modelId': 2674, 'cost': 10, 'modelFeature': 'audio-reference',
+                    'digitalSignature': 'signature-' + str(len(quotes)), 'timestamp': len(quotes),
+                    'modelContextConfig': {'minUploadedAudioDuration': 4 if len(quotes) == 1 else final_minimum,
+                                          'audioFormats': ['WAV', 'MP3'], 'maxUploadedAudioDuration': 30}}
+        if name == 'modelRouter.getModel':
+            return {'modelGroupId': 515, 'configs': [{'internalConfig': {'properties': {'input': {'type': 'object'}}}}]}
+        if name == 'userGenerationRouter.checkGenerationEligibility': return {}
+        if name == 'chatSession.createChatSession': return {'id': 'session-audio'}
+        raise AssertionError('Unexpected RPC: ' + name)
+    browsers = AsyncMock()
+    browsers.generation_verification.side_effect = verification
+    web = WebClient(aid, db, settings, browsers)
+    web.upload = AsyncMock(side_effect=upload)
+    web.rpc = AsyncMock(side_effect=rpc)
+    if final_minimum == 6:
+        with pytest.raises(ValueError, match='要求至少 6 秒'):
+            await web.prepare(task)
+        assert not any(call.args[0] in {'chatSession.createChatSession', 'userGenerationRouter.checkGenerationEligibility'} for call in web.rpc.await_args_list)
+        return
+    payload = await web.prepare(task)
+    expected = 4.8 if duration == 2800 else 4
+    assert quotes[0]['input']['user_inputs_metadata']['audio_urls'] == [{'duration': duration / 1000}]
+    assert quotes[1]['input']['user_inputs_metadata']['audio_urls'] == [{'duration': expected}]
+    assert payload['settings']['user_inputs_metadata']['audio_urls'] == [{'duration': expected}]
+    assert payload['costQuoteDigitalSignature'] == 'signature-2'
+    assert payload['artifacts'][0]['metadata']['durationMs'] == expected * 1000
+    assert payload['inputs']['audio_urls'][0]['fileUrl'].endswith('padded.wav' if duration == 2800 else 'original.wav')
+    assert events[-2:] == [('verification', None), ('quote', 2)]
+    records = db.task(task['id'])['result'].get('media_processing', [])
+    assert len(records) == (1 if duration == 2800 else 0)
+    if records:
+        assert records[0]['field'] == 'audio_urls' and records[0]['index'] == 1
+    assert db.task(task['id'])['request']['audio_urls'] == request['audio_urls']
 
 
 @pytest.mark.parametrize('fps', [24, 24000/1001, 60, 17424000/290381])

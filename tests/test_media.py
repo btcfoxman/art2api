@@ -1,13 +1,62 @@
 import hashlib
 import shutil
+import wave
+from array import array
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from app.catalog import normalize_request
-from app.media import adapt_reference_video, probe, run_media_command
+from app.media import adapt_reference_video, append_audio_silence, audio_silence_plan, probe, run_media_command
 from app.web_catalog import quote_input
+
+
+def audio_assets(*durations):
+    return [{'metadata': {'durationMs': round(duration * 1000)}} for duration in durations]
+
+
+def test_audio_silence_uses_two_second_steps_and_respects_individual_and_total_limits():
+    context = {'minUploadedAudioDuration': 4, 'maxUploadedAudioDuration': 30, 'maxTotalAudioDuration': 30}
+    assert audio_silence_plan(audio_assets(2.8, 4, .5), context) == [2, 0, 4]
+    assert audio_silence_plan(audio_assets(4, 5), context) == [0, 0]
+    assert audio_silence_plan(audio_assets(2.8), {}) == [0]
+    assert audio_silence_plan(audio_assets(2, 2), {'minTotalAudioDuration': 7, 'maxUploadedAudioDuration': 4}) == [2, 2]
+    for assets, limits in [
+        (audio_assets(2.8), {**context, 'maxUploadedAudioDuration': 4}),
+        (audio_assets(2.8, 26), context),
+        (audio_assets(2, 2), {'minTotalAudioDuration': 9, 'maxUploadedAudioDuration': 4}),
+    ]:
+        with pytest.raises(ValueError, match='超过'):
+            audio_silence_plan(assets, limits)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not shutil.which('ffmpeg') or not shutil.which('ffprobe'), reason='ffmpeg and ffprobe required')
+@pytest.mark.parametrize('source_duration,seconds', [(2.8, 2), (.5, 4)])
+async def test_audio_padding_preserves_samples_and_appends_only_silence(tmp_path, source_duration, seconds):
+    original = tmp_path / 'source.wav'
+    rate = 16000
+    samples = array('h', [1000, -1000] * round(rate * source_duration / 2)).tobytes()
+    with wave.open(str(original), 'wb') as output:
+        output.setparams((1, 2, rate, 0, 'NONE', 'not compressed'))
+        output.writeframes(samples)
+    digest = hashlib.sha256(original.read_bytes()).hexdigest()
+    metadata = {'fileName': original.name, 'mimeType': 'audio/wav', 'byteSize': original.stat().st_size,
+                'durationMs': round(source_duration * 1000)}
+    path, after, record = await append_audio_silence(original, metadata, seconds)
+    assert hashlib.sha256(original.read_bytes()).hexdigest() == digest and path != original
+    assert after['durationMs'] == metadata['durationMs'] + seconds * 1000
+    assert after['fileName'].endswith('.wav') and after['byteSize'] == path.stat().st_size
+    with wave.open(str(path), 'rb') as output:
+        assert (output.getnchannels(), output.getsampwidth(), output.getframerate()) == (1, 2, rate)
+        result = output.readframes(output.getnframes())
+    assert result[:len(samples)] == samples
+    assert result[len(samples):] == bytes(rate * seconds * 2)
+    assert record['added_seconds'] == seconds and record['after']['durationMs'] == after['durationMs']
+    with patch('app.media.run_media_command', AsyncMock()) as command:
+        assert await append_audio_silence(original, metadata, 0) == (original, metadata, None)
+        command.assert_not_awaited()
 
 
 @pytest.mark.asyncio
