@@ -422,6 +422,9 @@ async def test_generation_failure_preserves_safe_upstream_code_without_signed_ur
     assert 'private.example' not in str(input_video) and 'signature' not in str(input_video)
     optimization=generation_result({'status':'Failed','errorCode':'FILE_OPTIMIZATION_FAILED','reason':'other failure'})
     assert '预处理失败' in optimization['error_message'] and '审核' not in optimization['error_message']
+    credits=generation_result({'status':'Failed','errorCode':'INSUFFICIENT_CREDITS','reason':'Transaction failed for initId private-transaction'})
+    assert '积分不足' in credits['error_message'] and credits['upstream_error_code']=='INSUFFICIENT_CREDITS'
+    assert 'private-transaction' not in str(credits)
 
 
 @pytest.mark.asyncio
