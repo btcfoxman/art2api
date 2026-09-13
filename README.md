@@ -54,7 +54,7 @@ MCP 为可选后端，地址固定为 `https://mcp.artlist.io/mcp`。该模式�
 
 - Base URL：共享 Docker 网络使用 `http://art2api:8797`，外部调用使用公开 HTTPS 地址。
 - API Key：本服务的 `ART_API_KEY`。
-- Model Map：上表 10 个模型名使用同名映射；默认空对象也会使用内置同名映射。
+- Model Map：上表 10 个模型名使用同名映射；显式保存空对象会使该渠道没有可路由模型。
 - 开关：启用或关闭 ARTAPI。`Channel Routing Rules` 中的 `artapi` 位置决定首选与 fallback 顺序。
 
 Artlist 账号、会话和固定代理在 art2api 的账号卡片维护；lingya2api 卡片维护服务地址、服务密钥、模型映射与路由。账号关闭或缺少当次网页验证时不接受新任务，已有生成继续使用原账号、原代理查询。
