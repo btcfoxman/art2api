@@ -163,7 +163,7 @@ class Service:
             except ValueError:
                 continue
             candidates.append((account['id'], profile))
-        task, created = self.db.create_task(request, candidates, idempotency_key, self.settings.queue_limit)
+        task, created = self.db.create_task(request, candidates, idempotency_key, self.settings.queue_limit, self.settings.task_timeout)
         if created:
             self.db.event('task_queued', 'Task bound to account and proxy version', task['account_id'], task['id'])
             self.schedule(task['id'])

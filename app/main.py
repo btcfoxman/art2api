@@ -11,7 +11,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from typing import Literal
 
-from fastapi import Depends, FastAPI, Form, HTTPException, Request
+from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
@@ -22,6 +22,7 @@ from app.db import Database
 from app.errors import GatewayError
 from app.network import safe_error
 from app.service import Service
+from app.runtime_settings import RuntimePatch, apply_runtime, runtime_values
 
 
 class AccountCreate(BaseModel):
@@ -65,6 +66,8 @@ def create_app(settings=None):
     settings = settings or Settings()
     settings.validate()
     db = Database(settings.data_dir / 'art2api.db', settings.encryption_key)
+    apply_runtime(settings, db.runtime_settings())
+    db.pin_task_deadlines(settings.task_timeout)
     service = Service(db, settings)
     static = Path(__file__).parent / 'static'
 
@@ -174,8 +177,19 @@ def create_app(settings=None):
     @app.get('/api/settings', dependencies=[Depends(admin)])
     async def runtime():
         return {'mcp_url': settings.mcp_url, 'public_base_url': settings.public_base_url, 'proxy_required': True,
-                'task_timeout_seconds': settings.task_timeout, 'poll_interval_seconds': settings.poll_interval,
-                'queue_limit': settings.queue_limit, 'model_ids': list(PUBLIC_MODELS), 'profile_template': profile_template()}
+                **runtime_values(settings), 'version': settings.version, 'chrome_executable': settings.chrome_executable,
+                'model_ids': list(PUBLIC_MODELS), 'profile_template': profile_template()}
+
+    @app.patch('/api/settings', dependencies=[Depends(admin)])
+    async def save_runtime(payload: RuntimePatch):
+        values = payload.model_dump(exclude_unset=True)
+        if any(value is None for value in values.values()):
+            raise ValueError('设置值不能为空')
+        db.save_runtime_settings(values)
+        apply_runtime(settings, values)
+        if values:
+            db.event('settings_saved', '已更新运行设置：' + ', '.join(values))
+        return await runtime()
 
     @app.get('/api/accounts', dependencies=[Depends(admin)])
     async def accounts():
@@ -282,9 +296,13 @@ def create_app(settings=None):
         return service.save_profiles(account_id, await request.json())
 
     @app.get('/api/tasks', dependencies=[Depends(admin)])
-    async def tasks():
+    async def tasks(limit: int = Query(default=100, ge=1, le=500), offset: int = Query(default=0, ge=0)):
         return [{**service.public_task(task), 'account_id': task['account_id'], 'proxy_version': task['proxy_version'],
-                 'upstream_id': task['upstream_id'], 'internal_status': task['status'], 'request': task['request']} for task in db.tasks()]
+                 'upstream_id': task['upstream_id'], 'internal_status': task['status'], 'request': task['request']} for task in db.tasks(limit=limit, offset=offset)]
+
+    @app.get('/api/overview', dependencies=[Depends(admin)])
+    async def overview():
+        return db.task_summary()
 
     @app.post('/api/tasks', dependencies=[Depends(admin)])
     async def test_task(request: Request):

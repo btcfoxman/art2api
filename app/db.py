@@ -63,6 +63,9 @@ class Database:
                 digest TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id),
                 secret TEXT NOT NULL, expires_at REAL NOT NULL, task_id TEXT UNIQUE
             );
+            CREATE TABLE IF NOT EXISTS runtime_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1), value TEXT NOT NULL
+            );
         """)
         columns = {row[1] for row in self.conn.execute('PRAGMA table_info(tasks)')}
         if 'query_deadline' not in columns:
@@ -205,16 +208,38 @@ class Database:
                 result[key] = json.loads(result[key])
             return result
 
-    def tasks(self, active=False, limit=100):
+    def tasks(self, active=False, limit=100, offset=0):
         with self.lock:
             if active:
                 marks = ','.join('?' for _ in ACTIVE)
                 rows = self.conn.execute(f"SELECT id FROM tasks WHERE status IN ({marks}) ORDER BY created_at", ACTIVE).fetchall()
             else:
-                rows = self.conn.execute("SELECT id FROM tasks ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+                rows = self.conn.execute("SELECT id FROM tasks ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", (limit, offset)).fetchall()
             return [self.task(row['id']) for row in rows]
 
-    def create_task(self, request, candidates, idempotency_key, queue_limit):
+    def task_summary(self):
+        with self.lock:
+            counts = {row['status']: row['n'] for row in self.conn.execute('SELECT status, COUNT(*) AS n FROM tasks GROUP BY status')}
+            return {'total': sum(counts.values()), 'active': sum(counts.get(s, 0) for s in ACTIVE),
+                    'succeeded': counts.get('succeeded', 0), 'failed': counts.get('failed', 0),
+                    'unknown': counts.get('submission_unknown', 0)}
+
+    def runtime_settings(self):
+        with self.lock:
+            row = self.conn.execute('SELECT value FROM runtime_settings WHERE id=1').fetchone()
+            return json.loads(row['value']) if row else {}
+
+    def save_runtime_settings(self, values):
+        with self.transaction() as con:
+            current = self.runtime_settings()
+            current.update(values)
+            con.execute('INSERT INTO runtime_settings (id,value) VALUES (1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value', (dumps(current),))
+
+    def pin_task_deadlines(self, timeout):
+        with self.transaction() as con:
+            con.execute('UPDATE tasks SET query_deadline=created_at+? WHERE query_deadline=0', (timeout,))
+
+    def create_task(self, request, candidates, idempotency_key, queue_limit, task_timeout=3600):
         digest = hashlib.sha256(dumps(request).encode()).hexdigest()
         with self.transaction() as con:
             if idempotency_key:
@@ -235,6 +260,7 @@ class Database:
             account, profile = min(eligible, key=lambda item: (item[0]['active_tasks'], item[0]['updated_at']))
             task_id = 'art_' + uuid.uuid4().hex
             con.execute("INSERT INTO tasks (id,account_id,proxy_version,status,request,profile,idempotency_key,request_hash,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (task_id, account['id'], account['proxy_version'], 'queued', dumps(request), dumps(profile), idempotency_key or None, digest, time.time(), time.time()))
+            con.execute('UPDATE tasks SET query_deadline=created_at+? WHERE id=?', (task_timeout, task_id))
             if profile.get('backend') == 'web':
                 verification = con.execute('SELECT digest FROM web_verifications WHERE account_id=? AND task_id IS NULL AND expires_at>? ORDER BY expires_at LIMIT 1', (account['id'], time.time()+30)).fetchone()
                 if verification:
