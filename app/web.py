@@ -186,7 +186,18 @@ class WebClient:
             if maximum is not None and len(values)>maximum:
                 raise ValueError('Artlist 子模型素材数量超限：'+field)
             if kind == 'Image':
-                values = values + assets.get('first_frame', []) + assets.get('last_frame', [])
+                labelled = [(f'图{index}', value) for index, value in enumerate(values, 1)]
+                labelled += [(label, value) for key, label in [('first_frame', '首帧'), ('last_frame', '尾帧')] for value in assets.get(key, [])]
+                values = [value for _, value in labelled]
+                lower, upper = context.get('minImageResolutionPx'), context.get('maxImageResolutionPx')
+                invalid = []
+                for label, value in labelled:
+                    width, height = value['metadata'].get('width', 0), value['metadata'].get('height', 0)
+                    if (lower and min(width, height) < lower) or (upper and max(width, height) > upper):
+                        invalid.append(f'{label}（{width}×{height}）')
+                if invalid:
+                    bounds = '、'.join(filter(None, [f'短边至少 {lower}px' if lower else '', f'长边至多 {upper}px' if upper else '']))
+                    raise ValueError(f'Artlist 图片尺寸不受支持：{"、".join(invalid)}；要求{bounds}')
             for asset in values:
                 meta=asset['metadata']
                 limit=context.get('maxUploaded'+kind+'SizeMB')
@@ -198,11 +209,6 @@ class WebClient:
                 extension = {'JPEG':'JPG', 'M4A':'MP4', 'WAVE':'WAV'}.get(extension, extension)
                 if formats and extension and extension not in formats:
                     raise ValueError('Artlist 素材格式不受支持：'+field)
-                if kind == 'Image':
-                    lower, upper = context.get('minImageResolutionPx'), context.get('maxImageResolutionPx')
-                    dimensions = [meta.get('width', 0), meta.get('height', 0)]
-                    if (lower and min(dimensions)<lower) or (upper and max(dimensions)>upper):
-                        raise ValueError('Artlist 图片尺寸不受支持')
                 if kind == 'Video' and meta.get('fps'):
                     if (context.get('minVideoFps') and meta['fps']<context['minVideoFps']) or (context.get('maxVideoFps') and meta['fps']>context['maxVideoFps']):
                         raise ValueError('Artlist 参考视频帧率不受支持')

@@ -61,19 +61,30 @@ function renderAccounts() {
   $('#accountTabs').querySelectorAll('button').forEach(b => { const active = b.dataset.filter === state.accountFilter; b.classList.toggle('active', active); b.setAttribute('aria-pressed', String(active)); });
 }
 function durationText(task) {
-  const end = ['succeeded','failed','submission_unknown'].includes(task.internal_status) ? task.updated_at : Date.now()/1000;
+  const end = ['succeeded','failed'].includes(task.internal_status) ? task.updated_at : Date.now()/1000;
   const seconds = Math.max(0, Math.floor(end - task.created_at));
-  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds/60)}m ${seconds%60}s`;
+  return seconds < 60 ? `${seconds}秒` : `${Math.floor(seconds/60)}分${seconds%60}秒`;
 }
-function mediaText(request) { return [['image_urls','图'],['video_urls','视频'],['audio_urls','音频']].filter(([key]) => request[key]?.length).map(([key,label]) => `${request[key].length} ${label}`).join(' · ') || (request.first_frame ? '首尾帧' : '纯文本'); }
+function mediaFromTask(task) {
+  const request = task.request || {};
+  const inputs = [['image_urls','image','图'],['video_urls','video','视'],['audio_urls','audio','音']].flatMap(([field,kind,label]) => (request[field] || []).map((url,index) => ({kind, label:label+(index+1), url})));
+  for (const [field,label] of [['first_frame','首帧'],['last_frame','尾帧']]) if (request[field]) inputs.push({kind:'image', label, url:request[field]});
+  return inputs;
+}
+function mediaButtons(task) {
+  return mediaFromTask(task).map((item,index) => `<button type="button" data-media-task="${esc(task.id)}" data-media-index="${index}" title="预览${esc(item.label)}" aria-label="预览${esc(item.label)}"${safeUrl(item.url) ? '' : ' disabled'}>${esc(item.label)}</button>`).join('');
+}
 function taskRow(task) {
-  const url = safeUrl(task.content?.video_url), request = task.request;
-  return `<tr data-task-id="${esc(task.id)}"><td><code>${esc(task.id)}</code><small>${esc(state.accounts.find(a => a.id === task.account_id)?.name || task.account_id)} · 代理 v${task.proxy_version}</small>${task.upstream_id ? `<small class="mono">${esc(task.upstream_id)}</small>` : ''}</td>
-    <td><code>${esc(task.model)}</code><small>${esc(request.duration)} 秒 · ${esc(request.resolution)} · ${esc(request.aspect_ratio)} <span class="media-counts">/ ${esc(mediaText(request))}</span></small><span class="prompt">${esc(request.prompt)}</span></td>
-    <td>${badge(task.internal_status)}${task.error ? `<small class="error-note">${esc(task.error.message)}</small>` : ''}</td>
-    <td><span class="elapsed">${durationText(task)}</span>${['running','preparing','submitting'].includes(task.internal_status) ? '<div class="running-bar" aria-label="正在处理"></div>' : ''}</td>
-    <td>${esc(stamp(task.created_at))}<small>${esc(stamp(task.updated_at))}</small></td>
-    <td>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">查看视频 ↗</a>` : ''}${task.internal_status === 'submission_unknown' ? `<button data-recover="${esc(task.id)}">恢复查询</button>` : ''}<button data-detail="${esc(task.id)}">详情</button></td></tr>`;
+  const url = safeUrl(task.content?.video_url), request = task.request || {};
+  const terminal = ['succeeded','failed'].includes(task.internal_status);
+  const progress = Math.max(0, Math.min(Number(task.progress) || 0, 100));
+  const account = state.accounts.find(a => a.id === task.account_id)?.name || task.account_id || '待分配';
+  const spec = [task.model, request.duration ? `${request.duration}S` : '', request.resolution, request.aspect_ratio].filter(Boolean).join(' · ');
+  const result = task.error ? `<span class="error-stack"><span class="error-public" title="${esc(task.error.message)}">响应：${esc(task.error.message)}</span><span class="error-upstream" title="${esc(task.error.code)}">代码：${esc(task.error.code)}</span></span>` : `<span class="result-links">${url ? `<a href="${esc(url)}" data-result-task="${esc(task.id)}" target="_blank" rel="noopener noreferrer" title="预览生成视频">视</a>` : ''}</span>`;
+  return `<tr data-task-id="${esc(task.id)}"><td><button class="cell-title link-button mono" data-detail="${esc(task.id)}" title="${esc(task.id)}">${esc(task.id.slice(0,20))}</button><span class="cell-sub mono" title="ARTAPI · ${esc(account)} · 代理 v${task.proxy_version}">ARTAPI · ${esc(account)}</span></td>
+    <td class="prompt-cell"><span class="cell-title" title="${esc(request.prompt)}">${esc(request.prompt || '—')}</span><span class="task-meta-line"><span class="task-spec" title="${esc(spec)}">${esc(spec)}</span><span class="media-text">${mediaButtons(task)}</span></span></td>
+    <td>${badge(task.internal_status)}</td><td><div class="progress-stack"><span class="progress-value" title="按任务状态展示的阶段进度"><b class="mono">${progress}%</b><span class="progress-track"><i style="width:${progress}%"></i></span></span><span class="elapsed">${terminal ? '耗时' : '已用'} ${durationText(task)}</span></div></td>
+    <td><span class="time-stack"><span>创建 ${esc(stamp(task.created_at))}</span><span>更新 ${esc(stamp(task.updated_at))}</span></span></td><td>${result}${task.internal_status === 'submission_unknown' ? `<button data-recover="${esc(task.id)}">恢复查询</button>` : ''}</td></tr>`;
 }
 function renderTasks() {
   $('#tasks').innerHTML = state.tasks.map(taskRow).join(''); $('#tasksEmpty').hidden = state.tasks.length > 0;
@@ -148,16 +159,58 @@ $('#settingsForm').onsubmit = event => {
   });
 };
 function openTaskDetail(task) {
+  if (!task) return;
   const fields = [['本地任务', task.id],['上游任务', task.upstream_id || '—'],['账号', state.accounts.find(a => a.id === task.account_id)?.name || task.account_id],['模型', task.model],['生成参数', `${task.request.duration} 秒 · ${task.request.resolution} · ${task.request.aspect_ratio}`],['状态', labels[task.internal_status] || task.internal_status],['创建 / 更新', `${stamp(task.created_at)} / ${stamp(task.updated_at)}`]];
   if (task.error) fields.push(['错误代码', task.error.code],['错误详情', task.error.message]);
   for (const record of task.media_processing || []) {
     const spec = value => `${value.width}×${value.height} / ${(value.durationMs/1000).toFixed(3)} 秒 / ${value.fps}fps`;
     fields.push([`参考视频 ${record.index} 适配`, `${spec(record.before)} → ${spec(record.after)}；${record.actions.join('；')}`]);
   }
-  const links = [['生成视频', task.content?.video_url], ...['image_urls','video_urls','audio_urls'].flatMap((key, kind) => (task.request[key] || []).map((url, i) => [`${['参考图片','参考视频','参考音频'][kind]} ${i+1}`, url]))];
-  $('#taskDetail').innerHTML = `<dl class="detail-grid">${fields.map(([key,value]) => `<dt>${esc(key)}</dt><dd>${esc(value)}</dd>`).join('')}</dl><p class="field-title">完整提示词</p><div class="detail-prompt">${esc(task.request.prompt)}</div><div class="detail-links">${links.filter(([,url]) => safeUrl(url)).map(([label,url]) => `<a href="${esc(safeUrl(url))}" target="_blank" rel="noopener noreferrer">${esc(label)} ↗</a>`).join('')}</div>`;
+  $('#taskDetail').innerHTML = `<dl class="detail-grid">${fields.map(([key,value]) => `<dt>${esc(key)}</dt><dd>${esc(value)}</dd>`).join('')}</dl><p class="field-title">完整提示词</p><div class="detail-prompt">${esc(task.request.prompt)}</div><div class="detail-links media-text">${mediaButtons(task)}${safeUrl(task.content?.video_url) ? `<a href="${esc(safeUrl(task.content.video_url))}" data-result-task="${esc(task.id)}" target="_blank" rel="noopener noreferrer">生成视频 ↗</a>` : ''}</div>`;
+  state.detailTask = task;
   $('#taskDetailDialog').showModal();
 }
+let previewAnchor;
+function closeMediaPreview(restoreFocus = false) {
+  const popover = $('#mediaPopover');
+  popover.querySelectorAll('video,audio').forEach(media => { media.pause(); media.removeAttribute('src'); media.load(); });
+  if (popover.matches(':popover-open')) popover.hidePopover();
+  popover.hidden = true; popover.replaceChildren();
+  if (restoreFocus && previewAnchor?.isConnected) previewAnchor.focus();
+  previewAnchor = null;
+}
+function previewMedia(item, anchor) {
+  if (!item || !safeUrl(item.url)) return;
+  closeMediaPreview(); previewAnchor = anchor;
+  const popover = $('#mediaPopover'), url = safeUrl(item.url);
+  popover.innerHTML = `<header><strong>${esc(item.label)}</strong><a href="${esc(url)}" target="_blank" rel="noopener noreferrer">打开原素材 ↗</a><button type="button" class="icon-button" data-close-preview aria-label="关闭素材预览">${icon('x')}</button></header><div class="media-preview-body"></div><p class="preview-error" hidden>素材暂时无法预览，可打开原素材查看。</p>`;
+  const media = document.createElement(item.kind === 'image' ? 'img' : item.kind);
+  if (item.kind === 'image') { media.alt = item.label; media.referrerPolicy = 'no-referrer'; }
+  else { media.controls = true; media.preload = 'metadata'; media.autoplay = true; media.muted = item.kind === 'video'; media.playsInline = true; }
+  media.addEventListener('error', () => { if (media.isConnected) popover.querySelector('.preview-error').hidden = false; });
+  media.src = url; popover.querySelector('.media-preview-body').append(media);
+  popover.hidden = false; popover.showPopover();
+  const rect = anchor.getBoundingClientRect(), box = popover.getBoundingClientRect();
+  popover.style.left = `${Math.max(10, Math.min(rect.left, innerWidth-box.width-10))}px`;
+  popover.style.top = `${Math.max(10, Math.min(rect.bottom+6, innerHeight-box.height-10))}px`;
+}
+document.addEventListener('click', event => {
+  const button = event.target.closest('[data-media-task],[data-result-task]');
+  if (button) {
+    if (button.tagName === 'A' && (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey)) return;
+    event.preventDefault();
+    const id = button.dataset.mediaTask || button.dataset.resultTask;
+    const task = state.tasks.find(t => t.id === id) || (state.detailTask?.id === id ? state.detailTask : null);
+    if (task) previewMedia(button.dataset.resultTask ? {kind:'video',label:'生成视频',url:task.content?.video_url} : mediaFromTask(task)[Number(button.dataset.mediaIndex)], button);
+    return;
+  }
+  if (event.target.closest('[data-close-preview]')) closeMediaPreview(true);
+  else if (!event.target.closest('#mediaPopover')) closeMediaPreview();
+});
+document.addEventListener('keydown', event => { if (event.key === 'Escape' && !$('#mediaPopover').hidden) { event.preventDefault(); event.stopPropagation(); closeMediaPreview(true); } }, true);
+document.addEventListener('scroll', event => { if (!event.target.closest?.('#mediaPopover')) closeMediaPreview(); }, true);
+window.addEventListener('resize', () => closeMediaPreview());
+document.addEventListener('close', () => closeMediaPreview(), true);
 let pendingSubmission = null;
 function submissionKey(body) {
   if (pendingSubmission?.body !== body) {
