@@ -37,7 +37,7 @@ class Service:
     def web(self, account_id):
         key = (account_id, self.db.account(account_id)['proxy_version'])
         if key not in self.web_clients:
-            self.web_clients[key] = WebClient(account_id, self.db, self.settings)
+            self.web_clients[key] = WebClient(account_id, self.db, self.settings, self.browsers)
         return self.web_clients[key]
 
     async def import_web_session(self, account_id, payload):

@@ -29,6 +29,21 @@ PROCEDURES = {
 }
 
 
+def rejection_reason(response):
+    """Expose recognized public error codes, never arbitrary upstream text."""
+    try:
+        error = response.json().get('error', {})
+        error = error.get('json', error)
+        message = str(error.get('message', ''))
+        for code in ('TURNSTILE_VERIFICATION_FAILED', 'FREE_TIER_GENERATION_BLOCKED',
+                     'INSUFFICIENT_CREDITS', 'UNAUTHORIZED', 'FORBIDDEN'):
+            if code in message:
+                return code
+        return 'upstream_forbidden'
+    except (ValueError, AttributeError):
+        return 'upstream_forbidden'
+
+
 def unwrap(body):
     if not isinstance(body, dict) or 'error' in body:
         raise GatewayError('Artlist 网页接口拒绝请求', 'generation_rejected', 422)
@@ -45,9 +60,10 @@ def unwrap(body):
 
 class WebClient:
     """Captured tRPC protocol. Account cookies, media and queries share one fixed proxy."""
-    def __init__(self, account_id, db, settings):
+    def __init__(self, account_id, db, settings, browsers=None):
         self.account_id, self.db, self.settings = account_id, db, settings
         self.lock = asyncio.Lock()
+        self.browsers = browsers
 
     def secret(self):
         return self.db.account(self.account_id, True)['credentials']
@@ -73,8 +89,10 @@ class WebClient:
             self.db.update_account(self.account_id, enabled=False, status='unauthorized', last_error='网页登录已失效，请重新登录')
             raise GatewayError('Artlist 网页登录已失效', 'reauthorization_required', 401)
         if response.status_code == 403:
-            self.db.update_account(self.account_id, last_error='Artlist 拒绝请求（HTTP 403），请检查账号权限与网页登录状态')
-            raise GatewayError('Artlist 拒绝网页协议请求（HTTP 403）', 'generation_rejected', 422)
+            reason = rejection_reason(response)
+            message = f'Artlist 拒绝网页协议请求（HTTP 403，{reason}，{path.rsplit("/",1)[-1]}）'
+            self.db.update_account(self.account_id, last_error=message)
+            raise GatewayError(message, 'generation_rejected', 422)
         if response.status_code >= 500:
             raise GatewayError('Artlist 网页上游服务异常', 'web_upstream_error', 502, retryable=True)
         if response.status_code >= 400:
@@ -280,7 +298,11 @@ class WebClient:
             raise GatewayError('Artlist 未返回会话 ID', 'web_protocol_error')
         self.db.update_task(task['id'],result={'chat_session_id':session['id'],'resolved_model_id':quote['modelId']})
         token=self.db.take_verification(task['id'])
-        return generation_payload(session['id'],quote,inputs,settings,artifacts,token)
+        verification = {'token': token} if token else (await self.browsers.generation_verification(self.account_id) if self.browsers else {})
+        payload = generation_payload(session['id'],quote,inputs,settings,artifacts,verification.get('token', ''))
+        if verification.get('client_error'):
+            payload['turnstileClientError'] = verification['client_error']
+        return payload
 
     async def submit(self, payload):
         data=await self.rpc('userGenerationRouter.createUserGeneration',payload,post=True)

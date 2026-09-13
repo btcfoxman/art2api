@@ -7,6 +7,8 @@ import os
 import shutil
 import subprocess
 import time
+from http.cookies import SimpleCookie
+from pathlib import Path
 
 import httpx
 from websockets.asyncio.client import connect
@@ -65,6 +67,57 @@ class BrowserManager:
         self.db, self.settings = db, settings
         self.sessions = {}
         self.lock = asyncio.Lock()
+        self.verification_locks = {}
+
+    async def generation_verification(self, account_id):
+        """Run the normal SDK; never create generations or solve challenges."""
+        lock = self.verification_locks.setdefault(account_id, asyncio.Lock())
+        async with lock:
+            await self.open(account_id, 'about:blank')
+            cdp = await self.page(account_id)
+            account = self.db.account(account_id, True)
+            secret = account['credentials']
+            await cdp.call('Network.enable')
+            # Static blocking avoids the paused-request retry/resume hazard.
+            await cdp.call('Network.setBlockedURLs', {'urls': ['*createUserGeneration*']})
+            await cdp.call('Network.clearBrowserCookies')
+            jar = SimpleCookie()
+            jar.load(secret.get('web_cookie', ''))
+            await cdp.call('Network.setCookies', {'cookies': [
+                {'name': name, 'value': item.value, 'url': 'https://toolkit.artlist.io/', 'secure': True}
+                for name, item in jar.items()
+            ]})
+            await cdp.call('Page.navigate', {'url': 'https://toolkit.artlist.io/image-video-generator?mode=video'})
+            for _ in range(60):
+                if await cdp.evaluate("location.origin === 'https://toolkit.artlist.io' && !!window.turnstile"):
+                    break
+                await asyncio.sleep(1)
+            else:
+                raise GatewayError('后台网页验证脚本未就绪，请检查账号代理或登录', 'verification_unavailable', 503)
+            await cdp.evaluate(Path(__file__).with_name('verification.js').read_text(encoding='utf-8'))
+            try:
+                for _ in range(60):
+                    value = await cdp.evaluate('window.__art2apiVerification')
+                    if value and value.get('status') in {'ready', 'error', 'unsupported', 'timeout'}:
+                        break
+                    await asyncio.sleep(1)
+                else:
+                    raise GatewayError('Artlist 需要在账号控制台完成正常网页验证', 'verification_required', 503)
+                if value['status'] == 'ready':
+                    result = {'token': value['token']}
+                else:
+                    # Pass the real SDK result as the first-party tRPC link does.
+                    # Artlist decides whether this request is allowed.
+                    result = {'client_error': value['code']}
+                if self.db.account(account_id)['proxy_version'] != account['proxy_version']:
+                    raise GatewayError('验证期间账号代理已变更', 'proxy_binding_changed')
+                session = await self.session_credentials(account_id)
+                self.db.update_credentials(account_id, {'web_cookie': session['cookie'], 'web_user_agent': session['user_agent']})
+                self.db.event('web_verification', 'Normal SDK: '+('token_ready' if 'token' in result else result['client_error']), account_id)
+                return result
+            finally:
+                # Tokens exist only in memory and are consumed by one task.
+                await cdp.evaluate("(()=>{if(window.__art2apiVerificationWidget!==undefined)window.turnstile.remove(window.__art2apiVerificationWidget);document.getElementById('art2api-normal-verification')?.remove();delete window.__art2apiVerification;delete window.__art2apiVerificationWidget;return true})()")
 
     async def open(self, account_id, authorization_url):
         async with self.lock:

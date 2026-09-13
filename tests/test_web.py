@@ -173,7 +173,7 @@ def test_trpc_explicit_rejection_is_not_a_generation_id():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('with_verification', [False, True])
+@pytest.mark.parametrize('with_verification', ['background_token', 'background_error', 'provided'])
 async def test_compatible_api_submits_signed_web_task_and_returns_video(tmp_path, with_verification):
     from app.main import create_app
     settings=Settings(data_dir=tmp_path,api_key='a'*32,admin_token='b'*32,encryption_key=Fernet.generate_key().decode())
@@ -184,8 +184,9 @@ async def test_compatible_api_submits_signed_web_task_and_returns_video(tmp_path
     db.update_credentials(aid,{'web_cookie':'private-session','web_user_agent':'Browser'})
     db.update_account(aid,profiles=profiles(),status='ready')
     db.save_account({'enabled':True},aid)
-    if with_verification:
+    if with_verification == 'provided':
         db.save_verification(aid,'normal-unused-verification-'+'x'*40)
+    service.browsers.generation_verification = AsyncMock(return_value={'client_error':'600010'} if with_verification == 'background_error' else {'token':'background-normal-token'})
     web=service.web(aid)
     quote={'modelId':3009,'cost':1000,'modelFeature':'text-to-video','digitalSignature':'current-signature','timestamp':123,'modelContextConfig':{}}
     responses={
@@ -209,10 +210,16 @@ async def test_compatible_api_submits_signed_web_task_and_returns_video(tmp_path
             assert result['content']['video_url']=='https://media.example/result.mp4'
             submitted=next(c.args[1] for c in web.rpc.await_args_list if c.args[0]=='userGenerationRouter.createUserGeneration')
             assert submitted['modelGroupId']==3009 and submitted['costQuoteDigitalSignature']=='current-signature'
-            if with_verification:
+            if with_verification == 'provided':
                 assert submitted['turnstileToken'].startswith('normal-unused-verification-')
+                service.browsers.generation_verification.assert_not_awaited()
+            elif with_verification == 'background_token':
+                assert submitted['turnstileToken'] == 'background-normal-token'
+                service.browsers.generation_verification.assert_awaited_once_with(aid)
             else:
                 assert 'turnstileToken' not in submitted
+                assert submitted['turnstileClientError'] == '600010'
+                service.browsers.generation_verification.assert_awaited_once_with(aid)
             repeated=await api.post('/api/v3/contents/generations/tasks',json={'model':MODEL,'prompt':'test','duration':5})
             assert repeated.json()['id']==task_id
             assert sum(c.args[0]=='userGenerationRouter.createUserGeneration' for c in web.rpc.await_args_list)==1
@@ -220,3 +227,30 @@ async def test_compatible_api_submits_signed_web_task_and_returns_video(tmp_path
     finally:
         await service.stop()
         db.close()
+
+
+@pytest.mark.asyncio
+async def test_forbidden_diagnostics_never_expose_arbitrary_upstream_data(setup):
+    db, settings, aid = setup
+    def factory(*args, **kwargs):
+        return httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(403, json={'error':{'json':{'message':'TURNSTILE_VERIFICATION_FAILED private-cookie secret-signature'}}})), **kwargs)
+    with patch('app.web.client',factory):
+        with pytest.raises(GatewayError) as error:
+            await WebClient(aid,db,settings).submit({})
+    assert error.value.code == 'generation_rejected'
+    assert 'TURNSTILE_VERIFICATION_FAILED' in str(error.value)
+    assert 'private-cookie' not in str(error.value) and 'secret-signature' not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_background_verification_failure_never_enters_submit(setup):
+    db, settings, aid = setup
+    service = Service(db, settings)
+    web = AsyncMock()
+    web.prepare.side_effect = GatewayError('Normal verification needs operator', 'verification_required', 503)
+    service.web = lambda _: web
+    task = await service.create({'model':MODEL,'prompt':'test'}, 'verification-failed')
+    await asyncio.gather(*list(service.jobs.values()))
+    assert db.task(task['id'])['status'] == 'failed'
+    assert db.task(task['id'])['error_code'] == 'verification_required'
+    web.submit.assert_not_awaited()
