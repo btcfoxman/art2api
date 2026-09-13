@@ -1,0 +1,7 @@
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+httpx[socks]==0.28.1
+cryptography>=44,<47
+jsonschema>=4.23,<5
+playwright==1.58.0
+python-multipart==0.0.20

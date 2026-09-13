@@ -1,0 +1,1 @@
+"""Artlist MCP video gateway."""
