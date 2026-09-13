@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 from app.catalog import PUBLIC_MODELS
+from app.public_errors import public_message
 
 SNAPSHOT = json.loads(Path(__file__).with_name('web_models.json').read_text(encoding='utf-8'))
 GROUPS = {
@@ -183,6 +184,7 @@ def generation_result(data):
         if code:
             message += f'（{code}）'
         return {'status':'failed','error_code':'generation_failed','error_message':message,
+                'public_error_message':public_message('generation_failed', message+' '+str(data.get('reason', '')), code),
                 'upstream_error_code':code,'upstream_status':state}
     if state in {'completed', 'succeeded', 'success'}:
         outputs = data.get('outputs') or []

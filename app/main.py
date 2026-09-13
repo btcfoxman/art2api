@@ -14,6 +14,9 @@ from typing import Literal
 from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.catalog import PUBLIC_MODELS, profile_template
@@ -21,6 +24,7 @@ from app.config import Settings
 from app.db import Database
 from app.errors import GatewayError
 from app.network import safe_error
+from app.public_errors import public_error
 from app.service import Service
 from app.runtime_settings import RuntimePatch, apply_runtime, runtime_values
 
@@ -107,12 +111,28 @@ def create_app(settings=None):
         if not token or not hmac.compare_digest(token, settings.api_key):
             raise HTTPException(401, 'invalid API key')
 
+    def external_api(request):
+        path = request.url.path
+        return path in {'/v1', '/api/v3'} or path.startswith(('/v1/', '/api/v3/'))
+
+    def error_response(request, code, message, status, headers=None):
+        error = public_error(code, message) if external_api(request) else {'code': code, 'message': message}
+        return JSONResponse({'error': error}, status_code=status, headers=headers)
+
     @app.middleware('http')
     async def security_headers(request, call_next):
         origin = request.headers.get('origin')
         if origin and request.method not in {'GET', 'HEAD'} and origin.rstrip('/') not in {settings.public_base_url, str(request.base_url).rstrip('/')}:
+            if external_api(request):
+                return error_response(request, 'forbidden', '', 403)
             return JSONResponse({'detail': 'cross-origin request denied'}, status_code=403)
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            if not external_api(request):
+                raise
+            db.event('api_request_failed', type(exc).__name__)
+            response = error_response(request, 'internal_error', '', 500)
         response.headers['X-Content-Type-Options'] = 'nosniff'
         # no-referrer makes browser form POSTs send Origin: null, breaking the
         # same-origin login check. Keep the origin for local forms only.
@@ -123,20 +143,34 @@ def create_app(settings=None):
         return response
 
     @app.exception_handler(GatewayError)
-    async def gateway_error(_, exc):
-        return JSONResponse({'error': {'code': exc.code, 'message': safe_error(exc)}}, status_code=exc.status)
+    async def gateway_error(request, exc):
+        return error_response(request, exc.code, safe_error(exc), exc.status)
 
     @app.exception_handler(ValueError)
-    async def validation_error(_, exc):
-        return JSONResponse({'error': {'code': 'validation_error', 'message': safe_error(exc)}}, status_code=422)
+    async def validation_error(request, exc):
+        return error_response(request, 'validation_error', safe_error(exc), 422)
 
     @app.exception_handler(KeyError)
-    async def missing(_, exc):
-        return JSONResponse({'error': {'code': 'not_found', 'message': str(exc).strip("'")}}, status_code=404)
+    async def missing(request, exc):
+        return error_response(request, 'not_found', str(exc).strip("'"), 404)
 
     @app.exception_handler(sqlite3.IntegrityError)
-    async def conflict(_, exc):
-        return JSONResponse({'error': {'code': 'conflict', 'message': '代理已绑定其他账号，或记录存在冲突'}}, status_code=409)
+    async def conflict(request, exc):
+        return error_response(request, 'conflict', '代理已绑定其他账号，或记录存在冲突', 409)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request, exc):
+        if not external_api(request):
+            return await http_exception_handler(request, exc)
+        code = {401:'unauthorized', 403:'forbidden', 404:'not_found', 405:'method_not_allowed',
+                429:'rate_limited'}.get(exc.status_code, 'upstream_error')
+        return error_response(request, code, '', exc.status_code, exc.headers)
+
+    @app.exception_handler(RequestValidationError)
+    async def request_error(request, exc):
+        if not external_api(request):
+            return await request_validation_exception_handler(request, exc)
+        return error_response(request, 'validation_error', '', 422)
 
     @app.get('/health')
     async def health():
@@ -297,7 +331,7 @@ def create_app(settings=None):
 
     @app.get('/api/tasks', dependencies=[Depends(admin)])
     async def tasks(limit: int = Query(default=100, ge=1, le=500), offset: int = Query(default=0, ge=0)):
-        return [{**service.public_task(task), 'account_id': task['account_id'], 'proxy_version': task['proxy_version'],
+        return [{**service.public_task(task, internal=True), 'account_id': task['account_id'], 'proxy_version': task['proxy_version'],
                  'upstream_id': task['upstream_id'], 'internal_status': task['status'], 'request': task['request']} for task in db.tasks(limit=limit, offset=offset)]
 
     @app.get('/api/overview', dependencies=[Depends(admin)])
@@ -323,9 +357,14 @@ def create_app(settings=None):
     @app.post('/v1/videos', dependencies=[Depends(api_key)])
     @app.post('/api/v3/contents/generations/tasks', dependencies=[Depends(api_key)])
     async def generate(request: Request):
+        content_type = request.headers.get('content-type', '').split(';', 1)[0].lower()
+        if content_type and content_type != 'application/json' and not content_type.endswith('+json'):
+            raise ValueError('素材仅支持外链，暂不支持文件流/Base64等~')
         payload = await request.json()
+        if not isinstance(payload, dict):
+            raise ValueError('请求必须为 JSON 对象')
         key = request.headers.get('Idempotency-Key') or payload.pop('idempotency_key', '')
-        if len(key) > 200:
+        if not isinstance(key, str) or len(key) > 200:
             raise ValueError('idempotency key too long')
         return await service.create(payload, key)
 

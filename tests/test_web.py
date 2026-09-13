@@ -327,7 +327,7 @@ async def test_audio_preparation_pads_before_verification_and_submits_only_fresh
     if records:
         assert records[0]['field'] == 'audio_urls' and records[0]['index'] == 1
     assert db.task(task['id'])['request']['audio_urls'] == request['audio_urls']
-    processing = Service.public_task(db.task(task['id']))['prompt_processing']
+    processing = Service.public_task(db.task(task['id']), internal=True)['prompt_processing']
     assert processing['policy'] == 'reference_header' and processing['tags'] == ['@aud1']
 
 
@@ -398,7 +398,8 @@ async def test_generation_failure_preserves_safe_upstream_code_without_signed_ur
     stored=db.task(task['id'])
     assert stored['result']['resolved_model_id']==3011
     assert stored['result']['upstream_error_code']=='INPUT_URL_UNREACHABLE'
-    assert 'INPUT_URL_UNREACHABLE' in service.public_task(stored)['error']['message']
+    assert 'INPUT_URL_UNREACHABLE' in service.public_task(stored, internal=True)['error']['message']
+    assert service.public_task(stored)['error']['message']=='素材下载失败，请检查素材链接后重试~'
     web.submit.assert_not_awaited()
     unsafe=generation_result({'status':'Failed','errorCode':'private-token\nURL https://private.example'})
     assert unsafe['upstream_error_code']=='' and 'private-token' not in unsafe['error_message']
@@ -551,9 +552,11 @@ async def test_compatible_api_submits_signed_web_task_and_returns_video(tmp_path
             result=(await api.get('/api/v3/contents/generations/tasks/'+task_id)).json()
             assert result['status']=='succeeded'
             assert result['content']['video_url']=='https://media.example/result.mp4'
-            assert result['preparation_timing']['stage']=='ready'
+            assert 'preparation_timing' not in result
+            timing = Service.public_task(db.task(task_id), internal=True)['preparation_timing']
+            assert timing['stage']=='ready'
             for phase in ['media_seconds','verification_seconds','quote_seconds','eligibility_and_session_seconds','total_seconds']:
-                assert result['preparation_timing'][phase]>=0
+                assert timing[phase]>=0
             submitted=next(c.args[1] for c in web.rpc.await_args_list if c.args[0]=='userGenerationRouter.createUserGeneration')
             assert submitted['modelGroupId']==3009 and submitted['costQuoteDigitalSignature']=='current-signature'
             if with_verification == 'provided':
@@ -613,6 +616,6 @@ async def test_preparation_failure_preserves_stage_timing_and_never_submits(setu
     await asyncio.gather(*list(service.jobs.values()))
     stored = db.task(task['id'])
     assert stored['status']=='failed'
-    timing = Service.public_task(stored)['preparation_timing']
+    timing = Service.public_task(stored, internal=True)['preparation_timing']
     assert timing['stage']=='verification' and timing['total_seconds']>=timing['media_seconds']
     web.submit.assert_not_awaited()

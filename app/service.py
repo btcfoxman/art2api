@@ -11,6 +11,7 @@ from app.catalog import (PUBLIC_MODELS, build_arguments, local_schema, normalize
 from app.errors import GatewayError
 from app.mcp import MCPClient
 from app.network import client, safe_error
+from app.public_errors import public_error
 from app.oauth import OAuth
 from app.web import WebClient, web_task_context
 from app.web_catalog import profiles as web_profiles, validate_request as validate_web_request
@@ -148,7 +149,7 @@ class Service:
             existing = self.db.conn.execute('SELECT 1 FROM tasks WHERE idempotency_key=?', (idempotency_key,)).fetchone() if idempotency_key else None
             if not existing:
                 self.db.save_verification(account_id, payload['verification_token'])
-        candidates = []
+        candidates, validation_errors = [], []
         for account in self.db.accounts():
             if payload.get('verification_account_id') and account['id'] != payload['verification_account_id']:
                 continue
@@ -160,9 +161,12 @@ class Service:
                     validate_web_request(request, profile)
                 else:
                     build_arguments(request, profile, account['tools'])
-            except ValueError:
+            except ValueError as exc:
+                validation_errors.append(exc)
                 continue
             candidates.append((account['id'], profile))
+        if not candidates and validation_errors:
+            raise validation_errors[0]
         task, created = self.db.create_task(request, candidates, idempotency_key, self.settings.queue_limit, self.settings.task_timeout)
         if created:
             self.db.event('task_queued', 'Task bound to account and proxy version', task['account_id'], task['id'])
@@ -228,6 +232,7 @@ class Service:
                         result = {**self.db.task(task_id)['result'], **({
                             'upstream_error_code':data.get('upstream_error_code',''),
                             'upstream_status':data.get('upstream_status',''),
+                            'public_error_message':data.get('public_error_message',''),
                         } if web else {})}
                         self.db.update_task(task_id, status='failed', result=result,
                                             error=message or 'Artlist explicitly reported generation failure', error_code='generation_failed')
@@ -295,15 +300,17 @@ class Service:
         return {'object': 'list', 'data': list(available.values())}
 
     @staticmethod
-    def public_task(task):
+    def public_task(task, *, internal=False):
         result = task['result']
         url = result.get('video_url', '')
         status = 'failed' if task['status'] == 'submission_unknown' else task['status']
         return {'id': task['id'], 'object': 'video', 'status': status, 'model': task['request']['model'],
-                **({'media_processing': result['media_processing']} if result.get('media_processing') else {}),
-                **({'prompt_processing': result['prompt_processing']} if result.get('prompt_processing') else {}),
-                **({'preparation_timing': result['preparation_timing']} if result.get('preparation_timing') else {}),
+                **({key: result[key] for key in ('media_processing', 'prompt_processing', 'preparation_timing') if result.get(key)} if internal else {}),
                 'progress': 100 if status in {'succeeded', 'failed'} else 10 if status == 'queued' else 30,
                 'created_at': task['created_at'], 'updated_at': task['updated_at'],
                 'content': {'video_url': url} if url else {}, 'data': [{'url': url, 'type': 'video'}] if url else [],
-                'error': {'code': task['error_code'], 'message': task['error']} if task['error_code'] and status == 'failed' else None}
+                'error': ({'code': task['error_code'], 'message': task['error']} if internal else
+                          public_error(task['error_code'] or 'generation_failed', task['error'],
+                                       upstream_code=result.get('upstream_error_code', ''),
+                                       stored_message=result.get('public_error_message', '')))
+                         if status == 'failed' else None}
