@@ -145,6 +145,15 @@ def test_api_and_admin_are_separate_and_metadata_has_no_secrets(settings):
         assert http.post('/api/accounts',headers={'X-Requested-With':'art2api'},json={'name':'a','proxy_url':''}).status_code==422
 
 
+def test_login_preserves_origin_for_browser_forms_and_rejects_foreign_origin(settings):
+    app=create_app(settings)
+    with TestClient(app) as http:
+        assert http.get('/login').headers['Referrer-Policy']=='same-origin'
+        response=http.post('/login',headers={'Origin':settings.public_base_url},data={'token':settings.admin_token},follow_redirects=False)
+        assert response.status_code==303
+        assert http.post('/login',headers={'Origin':'https://untrusted.example'},data={'token':settings.admin_token}).status_code==403
+
+
 @pytest.mark.asyncio
 async def test_manual_recovery_renews_deadline_without_resubmission(db, settings):
     account=ready(db)

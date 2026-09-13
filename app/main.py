@@ -96,7 +96,9 @@ def create_app(settings=None):
             return JSONResponse({'detail': 'cross-origin request denied'}, status_code=403)
         response = await call_next(request)
         response.headers['X-Content-Type-Options'] = 'nosniff'
-        response.headers['Referrer-Policy'] = 'no-referrer'
+        # no-referrer makes browser form POSTs send Origin: null, breaking the
+        # same-origin login check. Keep the origin for local forms only.
+        response.headers['Referrer-Policy'] = 'same-origin'
         response.headers['X-Frame-Options'] = 'DENY'
         if not request.url.path.startswith('/static/'):
             response.headers['Cache-Control'] = 'no-store'
