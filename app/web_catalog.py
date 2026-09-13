@@ -83,7 +83,18 @@ def reference_prompt(request):
     order = {'image_urls':0, 'video_urls':1, 'audio_urls':2}
     tags = [{'tagId':f'{prefix}{index}', 'type':prefix, 'orderForType':index}
             for field,prefix,index in sorted(referenced,key=lambda value:(order[value[0]],value[2]))]
+    header = audio_reference_header(request, tags)
+    if header and not prompt.startswith(header):
+        # Seedance 2.5 can fail mapping audio references near the end of a
+        # long prompt. Keep a leading index of ONLY already-mentioned audio
+        # tags, retaining the complete prompt and the original asset indices.
+        prompt = header + prompt
     return prompt, tags
+
+
+def audio_reference_header(request, tags):
+    audio = [tag['tagId'] for tag in tags if tag['type'] == '@aud']
+    return ' '.join(audio) + '\n' if GROUPS[request['model']] == 515 and audio else ''
 
 
 def quote_input(request, assets):

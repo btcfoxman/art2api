@@ -76,7 +76,7 @@ def test_reference_aliases_match_prompt_and_keep_original_asset_indices():
     assets={field:[{'file_key':str(i),'file_url':url,'metadata':{'durationMs':4000}} for i,url in enumerate(request[field])]
             for field in ['image_urls','video_urls','audio_urls']}
     quote,inputs,settings,_=quote_input(request,assets)
-    expected='保留@vid1 的动作，使用@img2 的形象和@img1 的服装，声音@aud1。再次@img2。'
+    expected='@aud1\n保留@vid1 的动作，使用@img2 的形象和@img1 的服装，声音@aud1。再次@img2。'
     assert quote['input']['prompt']==inputs['prompt']==settings['prompt']==expected
     assert inputs['tagReferences']==settings['tagReferences']==[
         {'tagId':'@img1','type':'@img','orderForType':1}, {'tagId':'@img2','type':'@img','orderForType':2},
@@ -91,6 +91,26 @@ def test_media_without_prompt_mentions_does_not_invent_reference_tags():
     quote,inputs,settings,artifacts=quote_input(request,{'image_urls':[{'file_key':'image','file_url':request['image_urls'][0],'metadata':{}}]})
     assert 'tagReferences' not in inputs and 'tagReferences' not in settings and 'tagReferences' not in quote['input']
     assert len(inputs['image_urls'])==len(artifacts)==1
+
+
+def test_sd25_late_audio_reference_gets_leading_index_without_losing_prompt_or_adding_unused_tags():
+    original = '参考@图片2。' + '保留完整场景与镜头说明。' * 240 + '\n对白音色参考：@音频1。'
+    request = normalize_request({'model': MODEL, 'prompt': original,
+                                 'image_urls': ['https://media.example/1', 'https://media.example/2'],
+                                 'audio_urls': ['https://media.example/a1', 'https://media.example/a2']})
+    prompt, tags = reference_prompt(request)
+    translated = original.replace('@图片2', '@img2').replace('@音频1', '@aud1')
+    assert prompt == '@aud1\n' + translated
+    assert prompt.find('@aud1') < 20 and len(prompt) > 2400
+    assert tags == [{'tagId':'@img2','type':'@img','orderForType':2}, {'tagId':'@aud1','type':'@aud','orderForType':1}]
+    assert '@aud2' not in prompt and request['prompt'] == original
+    assert reference_prompt({**request, 'prompt': prompt}) == (prompt, tags)
+    assert reference_prompt({**request, 'model':'doubao-seedance-2-0-mini-260615'})[0] == translated
+    assets = {field: [{'file_key': str(index), 'file_url': url, 'metadata': {'durationMs': 4000}}
+                       for index, url in enumerate(request[field])] for field in ['image_urls', 'audio_urls']}
+    quote, inputs, settings, _ = quote_input(request, assets)
+    assert quote['input']['prompt'] == inputs['prompt'] == settings['prompt'] == prompt
+    assert len(inputs['audio_urls']) == 2 and inputs['tagReferences'] == tags
 
 
 @pytest.mark.parametrize('prompt',['@参考2','@img0','@视频1','@audio1'])
@@ -274,6 +294,8 @@ async def test_audio_preparation_pads_before_verification_and_submits_only_fresh
     if records:
         assert records[0]['field'] == 'audio_urls' and records[0]['index'] == 1
     assert db.task(task['id'])['request']['audio_urls'] == request['audio_urls']
+    processing = Service.public_task(db.task(task['id']))['prompt_processing']
+    assert processing['policy'] == 'audio_reference_header' and processing['tags'] == ['@aud1']
 
 
 @pytest.mark.parametrize('fps', [24, 24000/1001, 60, 17424000/290381])

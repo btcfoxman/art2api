@@ -20,7 +20,7 @@ from app.cookies import parse_cookie_header
 from app.errors import GatewayError
 from app.media import adapt_reference_video, append_audio_silence, audio_silence_plan, fps_in_range
 from app.network import client, public_media_url
-from app.web_catalog import GROUPS, generation_payload, generation_result, profiles, quote_input, validate_request
+from app.web_catalog import GROUPS, audio_reference_header, generation_payload, generation_result, profiles, quote_input, reference_prompt, validate_request
 
 BASE = 'https://toolkit.artlist.io'
 PROCEDURES = {
@@ -338,6 +338,12 @@ class WebClient:
     async def prepare(self, task):
         request=task['request']
         validate_request(request,task['profile'])
+        _, tags = reference_prompt(request)
+        if audio_reference_header(request, tags):
+            self.db.update_task(task['id'], result={**self.db.task(task['id'])['result'], 'prompt_processing': {
+                'policy': 'audio_reference_header', 'tags': [tag['tagId'] for tag in tags if tag['type'] == '@aud'],
+                'action': '在提示词开头列出原文已引用的音频标记，保留完整原文及素材序号',
+            }})
         assets={}
         def save_processing():
             records = [{**asset['processing'], 'field': key, 'index': index+1}

@@ -162,6 +162,7 @@ function openTaskDetail(task) {
   if (!task) return;
   const fields = [['本地任务', task.id],['上游任务', task.upstream_id || '—'],['账号', state.accounts.find(a => a.id === task.account_id)?.name || task.account_id],['模型', task.model],['生成参数', `${task.request.duration} 秒 · ${task.request.resolution} · ${task.request.aspect_ratio}`],['状态', labels[task.internal_status] || task.internal_status],['创建 / 更新', `${stamp(task.created_at)} / ${stamp(task.updated_at)}`]];
   if (task.error) fields.push(['错误代码', task.error.code],['错误详情', task.error.message]);
+  if (task.prompt_processing) fields.push(['音频引用兼容处理', `${task.prompt_processing.action}（${task.prompt_processing.tags.join('、')}）`]);
   for (const record of task.media_processing || []) {
     const audio = record.field === 'audio_urls';
     const spec = value => audio ? `${(value.durationMs/1000).toFixed(3)} 秒` : `${value.width}×${value.height} / ${(value.durationMs/1000).toFixed(3)} 秒 / ${value.fps}fps`;
