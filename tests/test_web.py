@@ -198,7 +198,11 @@ async def test_compatible_api_submits_signed_web_task_and_returns_video(tmp_path
         'userGenerationRouter.getUserGenerationById':CAPTURE,
         'userGenerationRouter.getUserGenerationOutputById':{'id':'output-1','generationId':'generation-1','fileUrl':'https://media.example/result.mp4'},
     }
-    web.rpc=AsyncMock(side_effect=lambda name,*args,**kwargs:responses[name])
+    def rpc_response(name,*args,**kwargs):
+        if name == 'modelRouter.getCostQuote' and with_verification != 'provided':
+            service.browsers.generation_verification.assert_awaited_once_with(aid)
+        return responses[name]
+    web.rpc=AsyncMock(side_effect=rpc_response)
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://localhost:8797',headers={'Authorization':'Bearer '+settings.api_key,'Idempotency-Key':'lingya2api:task-1'}) as api:
             response=await api.post('/api/v3/contents/generations/tasks',json={'model':MODEL,'prompt':'test','duration':5})

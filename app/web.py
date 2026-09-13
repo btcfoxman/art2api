@@ -4,6 +4,7 @@ import asyncio
 import json
 import mimetypes
 import tempfile
+import time
 import uuid
 from datetime import datetime
 from fractions import Fraction
@@ -290,8 +291,14 @@ class WebClient:
             urls=request.get(field) or []
             if isinstance(urls,str):urls=[urls]
             assets[field]=[await self.upload(url,kind) for url in urls]
+        # A cold browser verification may take tens of seconds. Obtain the
+        # short-lived cost signature only after normal verification completes.
+        token=self.db.take_verification(task['id'])
+        verification = {'token': token} if token else (await self.browsers.generation_verification(self.account_id) if self.browsers else {})
         quote,inputs,settings,artifacts=await self.quote(request,assets)
+        quoted_at = time.monotonic()
         eligibility=await self.rpc('userGenerationRouter.checkGenerationEligibility',{'price':quote['cost'],'modelId':quote['modelId'],'settings':settings},post=True)
+        self.db.update_credentials(self.account_id, {'web_last_preflight': {'eligibility': eligibility, 'model_id': quote['modelId']}})
         if eligibility.get('isFairUseExceeded') or eligibility.get('isConcurrencyExceeded'):
             raise GatewayError('Artlist 额度或并发不可用', 'generation_rejected', 422)
         session_input={'name':'ART2API '+task['id']}
@@ -300,9 +307,7 @@ class WebClient:
         session=await self.rpc('chatSession.createChatSession',session_input,post=True)
         if not session.get('id'):
             raise GatewayError('Artlist 未返回会话 ID', 'web_protocol_error')
-        self.db.update_task(task['id'],result={'chat_session_id':session['id'],'resolved_model_id':quote['modelId']})
-        token=self.db.take_verification(task['id'])
-        verification = {'token': token} if token else (await self.browsers.generation_verification(self.account_id) if self.browsers else {})
+        self.db.update_task(task['id'],result={'chat_session_id':session['id'],'resolved_model_id':quote['modelId'], 'quote_age_seconds': round(time.monotonic()-quoted_at,3), 'verification': 'token' if verification.get('token') else 'client_error' if verification.get('client_error') else 'none'})
         payload = generation_payload(session['id'],quote,inputs,settings,artifacts,verification.get('token', ''))
         if verification.get('client_error'):
             payload['turnstileClientError'] = verification['client_error']
