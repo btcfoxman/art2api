@@ -89,6 +89,10 @@ class WebClient:
             self.db.update_account(self.account_id, enabled=False, status='unauthorized', last_error='网页登录已失效，请重新登录')
             raise GatewayError('Artlist 网页登录已失效', 'reauthorization_required', 401)
         if response.status_code == 403:
+            self.db.update_credentials(self.account_id, {'web_last_rejection': {
+                'procedure': path.rsplit('/',1)[-1], 'status': 403,
+                'content_type': response.headers.get('content-type', ''), 'body': response.text[:16000],
+            }})
             reason = rejection_reason(response)
             message = f'Artlist 拒绝网页协议请求（HTTP 403，{reason}，{path.rsplit("/",1)[-1]}）'
             self.db.update_account(self.account_id, last_error=message)

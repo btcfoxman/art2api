@@ -159,13 +159,16 @@ class BrowserManager:
             profile.mkdir(parents=True, exist_ok=True)
             port_file = profile / 'DevToolsActivePort'
             port_file.unlink(missing_ok=True)
-            args = [executable, '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
+            args = [executable, '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
                     '--user-data-dir='+str(profile.resolve()), '--proxy-server='+proxy['server'],
                     '--proxy-bypass-list=<-loopback>', '--disable-quic', '--disable-dev-shm-usage',
                     '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--window-size=1100,760', 'about:blank']
             if os.name != 'nt' and hasattr(os, 'geteuid') and os.geteuid() == 0:
                 args.insert(1, '--no-sandbox')
             options = {}
+            display = None
+            if self.settings.browser_headless:
+                args.insert(1, '--headless=new')
             if os.name == 'nt':
                 startup = subprocess.STARTUPINFO()
                 startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
@@ -173,12 +176,24 @@ class BrowserManager:
                 options['startupinfo'] = startup
             guard = self.profile_guard(profile)
             try:
+                if os.name != 'nt' and not self.settings.browser_headless:
+                    xvfb = shutil.which('Xvfb')
+                    if not xvfb:
+                        raise GatewayError('后台图形浏览器需要 Xvfb；请使用项目 Docker 镜像', 'browser_error')
+                    display = await asyncio.create_subprocess_exec(xvfb, '-displayfd', '1', '-screen', '0', '1100x760x24', '-nolisten', 'tcp', stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+                    number = (await asyncio.wait_for(display.stdout.readline(), 10)).decode().strip()
+                    if not number.isdigit():
+                        raise GatewayError('后台浏览器显示服务启动失败', 'browser_error')
+                    options['env'] = {**os.environ, 'DISPLAY': ':'+number}
                 process = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, **options)
             except BaseException:
+                if display and display.returncode is None:
+                    display.terminate()
+                    await display.wait()
                 if guard:
                     guard.close()
                 raise
-            self.sessions[account_id] = {'process': process, 'expires': time.time()+self.settings.browser_timeout, 'cdp': None, 'profile_guard': guard}
+            self.sessions[account_id] = {'process': process, 'expires': time.time()+self.settings.browser_timeout, 'cdp': None, 'profile_guard': guard, 'display': display}
             try:
                 for _ in range(100):
                     if port_file.exists():
@@ -258,6 +273,10 @@ class BrowserManager:
                     await process.wait()
             if session.get('profile_guard'):
                 session['profile_guard'].close()
+            display = session.get('display')
+            if display and display.returncode is None:
+                display.terminate()
+                await display.wait()
 
     async def cleanup(self):
         for account_id, session in list(self.sessions.items()):

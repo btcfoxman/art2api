@@ -3,7 +3,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY requirements.txt .
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates chromium fonts-noto-cjk ffmpeg \
+    && apt-get install -y --no-install-recommends ca-certificates chromium xvfb fonts-noto-cjk ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir -r requirements.txt
 COPY app ./app

@@ -18,9 +18,10 @@ class Settings:
     task_timeout: int = field(default_factory=lambda: int(os.getenv("ART_TASK_TIMEOUT_SECONDS", "3600")))
     queue_limit: int = field(default_factory=lambda: int(os.getenv("ART_QUEUE_LIMIT", "100")))
     chrome_executable: str = field(default_factory=lambda: os.getenv("ART_CHROME_EXECUTABLE", ""))
+    browser_headless: bool = field(default_factory=lambda: os.getenv('ART_BROWSER_HEADLESS', '0').lower() in {'1','true','yes'})
     browser_timeout: int = 900
     oauth_client_id: str = field(default_factory=lambda: os.getenv("ART_OAUTH_CLIENT_ID", ""))
-    version: str = "0.2.3"
+    version: str = "0.2.4"
 
     def validate(self):
         if len(self.api_key) < 24 or len(self.admin_token) < 24:
