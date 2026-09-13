@@ -36,8 +36,8 @@ MCP 为可选后端，地址固定为 `https://mcp.artlist.io/mcp`。该模式�
 | `doubao-seedance-2-0-fast-260128` | Seedance 2.0 Fast / 377 | 默认 720p | 实时报价 |
 | `doubao-seedance-2-0-260128` | Seedance 2.0 / 358 | 默认 720p | 实时报价 |
 | `doubao-seedance-2-0-260128-4k` | Seedance 2.0 / 358 | 固定 4k | 实时报价 |
-| `doubao-seedance-2-0-mini-260615` | Seedance 2.0 Mini / 416 | 默认 720p | 实时报价 |
-| `doubao-seedance-2-0-fast-260128-480p` | Seedance 2.0 Fast / 377 | 固定 480p | 用户实际生成与结果查询 |
+| `doubao-seedance-2-0-mini-260615` | Seedance 2.0 Mini / 416 | 默认 720p | 720p 渠道协议生成与结果查询 |
+| `doubao-seedance-2-0-fast-260128-480p` | Seedance 2.0 Fast / 377 | 固定 480p | 渠道协议生成与结果查询 |
 | `doubao-seedance-2-0-260128-480p` | Seedance 2.0 / 358 | 固定 480p | 实时报价 |
 | `doubao-seedance-2-0-260128-1080p` | Seedance 2.0 / 358 | 固定 1080p | 实时报价 |
 | `sd-2-5` | Seedance 2.5 / 515 | 固定 720p | 实时报价 |
@@ -88,6 +88,13 @@ Artlist 账号、会话和固定代理在 art2api 的账号卡片维护；lingya
 
 ## 验证
 
-运行 `python -m pytest tests -q`。测试覆盖固定代理、会话加密、模型映射、素材参数、报价/提交字段差异、任务与输出 ID 校验、一次性验证、幂等和未知提交恢复。
+运行 `python -m pytest tests -q`。测试覆盖固定代理、会话加密、模型映射、素材参数、报价/提交字段差异、任务与输出 ID 校验、一次性验证、幂等和未知提交恢复，以及 Cookie 中的 JSON 值、登录域、匿名会话保护、容器更换后的 Profile 锁和浏览器正常退出。
 
-2026-09-13 使用实际 WebClient 经账号固定代理验证了全部 10 个模型的文本报价与子模型定义，并查询确认用户创建的 Fast 480p、Seedance 2.5 480p 两条任务完成。没有将报价通过视为生成通过；其余分辨率及推断参数组合仍需生成验收。
+2026-09-13 在 192.168.3.5 pre 中，使用已部署 lingya2api 的 ARTAPI 提交和查询适配器，连续调用已部署 art2api，完成以下两条真实生成。没有向请求预先注入人工提供的验证令牌，未点击 Artlist 模型或生成按钮；验证由服务端 Chromium 的正常 SDK 完成，提交和查询使用 HTTP 协议。
+
+| 请求 | 最终视频 | 音频 | 结果 |
+|---|---|---|---|
+| Seedance 2.0 Mini，720p，4 秒 | 1280×720，MP4 容器 4.096 秒 | 有 | 生成、查询、下载与 ffprobe 检查通过 |
+| Seedance 2.0 Fast，480p，4 秒 | 864×496，MP4 容器 4.096 秒 | 有 | 生成、查询、下载与 ffprobe 检查通过 |
+
+全部 10 个模型的文本报价与子模型定义此前已验证，另已查询确认用户创建的 Seedance 2.5 480p 任务完成。其余分辨率及推断参数组合尚未逐项生成验收，不能将报价通过视为生成通过。

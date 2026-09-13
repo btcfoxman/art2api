@@ -26,7 +26,7 @@ def profiles():
         fixed, _ = PUBLIC_MODELS[model]
         result[model] = {
             'backend': 'web', 'group_id': group,
-            'validation': 'generation_observed' if model in {'sd-2-5-480p', 'doubao-seedance-2-0-fast-260128-480p'} else 'quote_verified',
+            'validation': 'generation_observed' if model in {'sd-2-5-480p', 'doubao-seedance-2-0-fast-260128-480p', 'doubao-seedance-2-0-mini-260615'} else 'quote_verified',
             'constraints': {
                 'durations': [int(v) for v in fields['duration']['values']],
                 'resolutions': [fixed] if fixed else fields['resolution']['values'],

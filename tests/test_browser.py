@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 import os
 import socket
 
@@ -6,6 +6,7 @@ import pytest
 
 from app.browser import BrowserManager
 from app.config import Settings
+from app.errors import GatewayError
 
 
 @pytest.mark.asyncio
@@ -65,3 +66,20 @@ async def test_browser_close_flushes_profile_before_releasing_ownership():
     manager.sessions['a']={'cdp':CDP(),'process':Process(),'profile_guard':Guard()}
     await manager.close('a')
     assert events == ['Browser.close','socket_closed','process_exited','profile_released']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('identity', [None, 'different-account'])
+async def test_browser_never_overwrites_login_with_anonymous_or_other_account(identity):
+    db=Mock()
+    db.account.return_value={'proxy_version':1,'credentials':{'web_cookie':'session=private','web_user_id':'original-account'}}
+    manager=BrowserManager(db,Settings())
+    cdp=AsyncMock()
+    cdp.evaluate.side_effect=[True,identity]
+    manager.open=AsyncMock()
+    manager.page=AsyncMock(return_value=cdp)
+    with pytest.raises(GatewayError) as error:
+        await manager.generation_verification('a')
+    assert error.value.code=='reauthorization_required'
+    db.update_credentials.assert_not_called()
+    assert cdp.evaluate.await_count==2
