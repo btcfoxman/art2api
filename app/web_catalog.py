@@ -90,13 +90,12 @@ def quote_input(request, assets):
     return {'modelGroupId': group, 'input': {**settings, **inputs}}, inputs, settings, artifacts
 
 
-def generation_payload(session_id, quote, inputs, settings, artifacts, verification_token):
-    if not verification_token:
-        raise ValueError('网页提交需要当次正常验证令牌')
+def generation_payload(session_id, quote, inputs, settings, artifacts, verification_token=''):
     return {'chatSessionId': session_id, 'inputs': inputs, 'modelGroupId': quote['modelId'],
             'feature': quote['modelFeature'], 'price': quote['cost'], 'settings': settings, 'artifacts': artifacts,
             'costQuoteDigitalSignature': quote['digitalSignature'], 'timestamp': quote['timestamp'],
-            'generationMethod': 'credits', 'isCopyCmsFileEnabled': False, 'turnstileToken': verification_token}
+            'generationMethod': 'credits', 'isCopyCmsFileEnabled': False,
+            **({'turnstileToken': verification_token} if verification_token else {})}
 
 
 def generation_result(data):

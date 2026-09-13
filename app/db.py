@@ -228,18 +228,17 @@ class Database:
             eligible = []
             for account_id, profile in candidates:
                 account = self.account(account_id)
-                if profile.get('backend') == 'web' and not self.has_verification(account_id):
-                    continue
                 if account['enabled'] and account['status'] == 'ready' and not account['duplicate_egress'] and self.active_count(account_id) < account['max_concurrency']:
                     eligible.append((account, profile))
             if not eligible:
-                raise GatewayError("ARTAPI has no available authorized proxy account, capacity, or current web verification for this model", "entitlement_unavailable", 503)
+                raise GatewayError("ARTAPI has no available authorized proxy account or capacity for this model", "entitlement_unavailable", 503)
             account, profile = min(eligible, key=lambda item: (item[0]['active_tasks'], item[0]['updated_at']))
             task_id = 'art_' + uuid.uuid4().hex
             con.execute("INSERT INTO tasks (id,account_id,proxy_version,status,request,profile,idempotency_key,request_hash,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (task_id, account['id'], account['proxy_version'], 'queued', dumps(request), dumps(profile), idempotency_key or None, digest, time.time(), time.time()))
             if profile.get('backend') == 'web':
                 verification = con.execute('SELECT digest FROM web_verifications WHERE account_id=? AND task_id IS NULL AND expires_at>? ORDER BY expires_at LIMIT 1', (account['id'], time.time()+30)).fetchone()
-                con.execute('UPDATE web_verifications SET task_id=? WHERE digest=?', (task_id, verification['digest']))
+                if verification:
+                    con.execute('UPDATE web_verifications SET task_id=? WHERE digest=?', (task_id, verification['digest']))
             return self.task(task_id), True
 
     def has_verification(self, account_id):
@@ -258,8 +257,10 @@ class Database:
 
     def take_verification(self, task_id):
         with self.transaction() as con:
-            row = con.execute('SELECT * FROM web_verifications WHERE task_id=? AND expires_at>?', (task_id, time.time())).fetchone()
-            if not row or not row['secret']:
+            row = con.execute('SELECT * FROM web_verifications WHERE task_id=?', (task_id,)).fetchone()
+            if not row:
+                return ''
+            if row['expires_at'] <= time.time() or not row['secret']:
                 raise GatewayError('网页验证已过期，需要重新完成正常网页验证', 'generation_rejected', 422)
             token = self.unseal(row['secret'])['token']
             con.execute("UPDATE web_verifications SET secret='' WHERE task_id=?", (task_id,))

@@ -280,7 +280,8 @@ class Service:
             if account['enabled'] and account['status'] == 'ready' and not account['duplicate_egress']:
                 for model, profile in account['profiles'].items():
                     available.setdefault(model, {'id': model, 'object': 'model', 'owned_by': 'art2api', 'capabilities': [],
-                                                 'verification_required': profile.get('backend') == 'web', 'validation': profile.get('validation','configured')})['capabilities'].append(profile['constraints'])
+                                                 'verification_required': False, 'verification_supported': profile.get('backend') == 'web',
+                                                 'validation': profile.get('validation','configured')})['capabilities'].append(profile['constraints'])
         return {'object': 'list', 'data': list(available.values())}
 
     @staticmethod

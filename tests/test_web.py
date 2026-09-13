@@ -79,9 +79,6 @@ def test_start_end_frames_are_not_silently_merged_into_references():
 def test_verified_task_tokens_are_encrypted_bound_and_single_use(setup):
     db,_,aid=setup
     req=normalize_request({'model':MODEL,'prompt':'test'})
-    with pytest.raises(GatewayError) as error:
-        db.create_task(req,[(aid,profiles()[MODEL])],'first',10)
-    assert error.value.code=='entitlement_unavailable' and db.tasks()==[]
     token='normal-user-verification-'+'x'*40
     db.save_verification(aid,token)
     first,_=db.create_task(req,[(aid,profiles()[MODEL])],'first',10)
@@ -176,7 +173,8 @@ def test_trpc_explicit_rejection_is_not_a_generation_id():
 
 
 @pytest.mark.asyncio
-async def test_compatible_api_submits_signed_web_task_and_returns_video(tmp_path):
+@pytest.mark.parametrize('with_verification', [False, True])
+async def test_compatible_api_submits_signed_web_task_and_returns_video(tmp_path, with_verification):
     from app.main import create_app
     settings=Settings(data_dir=tmp_path,api_key='a'*32,admin_token='b'*32,encryption_key=Fernet.generate_key().decode())
     app=create_app(settings)
@@ -186,7 +184,8 @@ async def test_compatible_api_submits_signed_web_task_and_returns_video(tmp_path
     db.update_credentials(aid,{'web_cookie':'private-session','web_user_agent':'Browser'})
     db.update_account(aid,profiles=profiles(),status='ready')
     db.save_account({'enabled':True},aid)
-    db.save_verification(aid,'normal-unused-verification-'+'x'*40)
+    if with_verification:
+        db.save_verification(aid,'normal-unused-verification-'+'x'*40)
     web=service.web(aid)
     quote={'modelId':3009,'cost':1000,'modelFeature':'text-to-video','digitalSignature':'current-signature','timestamp':123,'modelContextConfig':{}}
     responses={
@@ -210,7 +209,10 @@ async def test_compatible_api_submits_signed_web_task_and_returns_video(tmp_path
             assert result['content']['video_url']=='https://media.example/result.mp4'
             submitted=next(c.args[1] for c in web.rpc.await_args_list if c.args[0]=='userGenerationRouter.createUserGeneration')
             assert submitted['modelGroupId']==3009 and submitted['costQuoteDigitalSignature']=='current-signature'
-            assert submitted['turnstileToken'].startswith('normal-unused-verification-')
+            if with_verification:
+                assert submitted['turnstileToken'].startswith('normal-unused-verification-')
+            else:
+                assert 'turnstileToken' not in submitted
             repeated=await api.post('/api/v3/contents/generations/tasks',json={'model':MODEL,'prompt':'test','duration':5})
             assert repeated.json()['id']==task_id
             assert sum(c.args[0]=='userGenerationRouter.createUserGeneration' for c in web.rpc.await_args_list)==1

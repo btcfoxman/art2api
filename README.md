@@ -23,7 +23,7 @@
 4. 卡片展示接入方式、代理地址、检测出口、登录状态、提交验证状态、模型数量和运行任务。多个账号使用独立代理和浏览器 Profile。
 5. “查询网页任务”接受该账号已有的 Artlist generation ID，直接核对任务状态和输出文件，无须重复生成。
 
-**网页登录与当次生成验证是两个条件。** 2026-09-13 捕获的成功提交包含一次性网页验证令牌。当前实现支持在“网页登录设置”登记本人正常验证取得的未使用令牌，最多保留 4 分钟，仅供一个任务使用；没有自动获取生成验证令牌的流程，因此尚不能无人值守连续生成。缺少验证时在提交前返回 `503 / entitlement_unavailable`，lingya2api 可继续 fallback。账号密码、登录 Cookie 本身不能替代这一条件。
+生成和查询通过固定代理发送 HTTP 协议请求。登录会话存在时可直接提交，不要求预先打开网页或登记验证令牌。捕获的网页请求包含 `turnstileToken`，但仅凭这一点不能认定所有协议请求都必须携带它；上游是否接受以实际响应为准。保留可选的一次性验证令牌输入，登记后最多保留 4 分钟，仅供一个任务使用。明确拒绝会保存错误并交给渠道 fallback；提交结果未知时禁止重提。
 
 Cookie、OAuth 令牌、代理认证和网页验证令牌均加密保存，不通过账号查询接口回传。浏览器 Profile 也应作为敏感数据保护。代理支持 HTTP/SOCKS5，`xray:20001` 会规范化为 SOCKS5。CDP 登录浏览器需要无认证的本地代理入口，例如 `socks5://xray:20001`；协议调用支持带认证代理。账号有未结束任务时不能更换代理或切换接入方式；重新登录恢复查询时必须保持同一 Artlist 身份。
 
@@ -57,7 +57,7 @@ MCP 为可选后端，地址固定为 `https://mcp.artlist.io/mcp`。该模式�
 - Model Map：上表 10 个模型名使用同名映射；显式保存空对象会使该渠道没有可路由模型。
 - 开关：启用或关闭 ARTAPI。`Channel Routing Rules` 中的 `artapi` 位置决定首选与 fallback 顺序。
 
-Artlist 账号、会话和固定代理在 art2api 的账号卡片维护；lingya2api 卡片维护服务地址、服务密钥、模型映射与路由。账号关闭或缺少当次网页验证时不接受新任务，已有生成继续使用原账号、原代理查询。
+Artlist 账号、会话和固定代理在 art2api 的账号卡片维护；lingya2api 卡片维护服务地址、服务密钥、模型映射与路由。账号关闭或并发已满时不接受新任务，已有生成继续使用原账号、原代理查询。
 
 ## API
 
@@ -80,7 +80,7 @@ Artlist 账号、会话和固定代理在 art2api 的账号卡片维护；lingya
 {"model":"sd-2-5-480p","prompt":"海边日出，镜头缓慢推进","duration":5,"aspect_ratio":"16:9","image_urls":[],"video_urls":[],"audio_urls":[],"generate_audio":true}
 ```
 
-可通过请求的 `verification_account_id` 和 `verification_token` 绑定账号并登记当次验证，或预先在管理端登记。令牌不写入任务请求内容。推荐使用 `Idempotency-Key`：同一键与同一规范化请求返回原任务，不会再次提交；相同键与不同请求返回 409。
+可选通过请求的 `verification_account_id` 和 `verification_token` 绑定账号并登记当次验证，或预先在管理端登记；常规协议调用不需要这两个字段。令牌不写入任务请求内容。推荐使用 `Idempotency-Key`：同一键与同一规范化请求返回原任务，不会再次提交；相同键与不同请求返回 409。
 
 网页任务先用 generation ID 查询 `getUserGenerationById`，再用 output ID 查询 `getUserGenerationOutputById`，核对两者关联后返回视频地址。进程重启恢复原任务查询。提交中断或接受情况不明时标记 `submission_unknown`，阻止重复扣费与自动 fallback；管理员可补充真实 generation ID 恢复查询。完成状态暂时没有输出时继续查询，低于请求分辨率的输出不作为成功结果返回。
 

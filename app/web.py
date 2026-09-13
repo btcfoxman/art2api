@@ -73,8 +73,8 @@ class WebClient:
             self.db.update_account(self.account_id, enabled=False, status='unauthorized', last_error='网页登录已失效，请重新登录')
             raise GatewayError('Artlist 网页登录已失效', 'reauthorization_required', 401)
         if response.status_code == 403:
-            self.db.update_account(self.account_id, last_error='Artlist 要求重新完成正常网页验证')
-            raise GatewayError('Artlist 网页验证未通过，请通过账号代理重新验证', 'generation_rejected', 422)
+            self.db.update_account(self.account_id, last_error='Artlist 拒绝请求（HTTP 403），请检查账号权限与网页登录状态')
+            raise GatewayError('Artlist 拒绝网页协议请求（HTTP 403）', 'generation_rejected', 422)
         if response.status_code >= 500:
             raise GatewayError('Artlist 网页上游服务异常', 'web_upstream_error', 502, retryable=True)
         if response.status_code >= 400:
