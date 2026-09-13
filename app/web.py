@@ -6,6 +6,7 @@ import mimetypes
 import tempfile
 import time
 import uuid
+from contextvars import ContextVar
 from datetime import datetime
 from fractions import Fraction
 from http.cookies import SimpleCookie
@@ -30,6 +31,25 @@ PROCEDURES = {
     'userGenerationRouter.createUserGeneration', 'userGenerationRouter.getUserGenerationById',
     'userGenerationRouter.getUserGenerationOutputById', 'userGenerationRouter.getUserGenerationsBySession',
 }
+# Only observed read-only operations may be repeated after a transport failure.
+# Some tRPC queries use POST; HTTP method alone cannot establish replay safety.
+SAFE_RETRY_METHODS = {
+    '/api/auth/session': 'GET',
+    **{'/api/trpc/'+name: 'GET' for name in (
+        'dynamicPromptSettings.getDynamicPromptSettings', 'modelRouter.getModelGroups',
+        'modelRouter.getModel', 'userGenerationRouter.getUserGenerationById',
+        'userGenerationRouter.getUserGenerationOutputById',
+        'userGenerationRouter.getUserGenerationsBySession',
+    )},
+    **{'/api/trpc/'+name: 'POST' for name in (
+        'modelRouter.getCostQuote', 'userGenerationRouter.checkGenerationEligibility',
+        'uploadRouter.getPresignedUrl', 'uploadRouter.getPresignedUrlFromKey',
+    )},
+}
+TRANSIENT_TRANSPORT_ERRORS = (
+    httpx.TimeoutException, httpx.NetworkError, httpx.ProxyError, httpx.RemoteProtocolError,
+)
+web_task_context = ContextVar('web_task_context', default=None)
 
 
 def rejection_reason(response):
@@ -72,8 +92,38 @@ class WebClient:
         return self.db.account(self.account_id, True)['credentials']
 
     async def request(self, method, path, **kwargs):
-        async with self.lock:
-            return await self._request(method, path, **kwargs)
+        method = method.upper()
+        attempts = 3 if SAFE_RETRY_METHODS.get(path) == method else 1
+        account = self.db.account(self.account_id, True)
+        binding = (account['proxy_version'], account['credentials'].get('web_user_id'))
+        started = time.monotonic()
+        for attempt in range(1, attempts+1):
+            try:
+                async with self.lock:
+                    current = self.db.account(self.account_id, True)
+                    if (current['proxy_version'], current['credentials'].get('web_user_id')) != binding:
+                        raise GatewayError('请求重试期间账号或固定代理已变更', 'proxy_binding_changed')
+                    response = await self._request(method, path, **kwargs)
+            except httpx.TransportError as exc:
+                retry = isinstance(exc, TRANSIENT_TRANSPORT_ERRORS) and attempt < attempts
+                # Exception strings can contain proxy credentials, cookies or
+                # signed inputs. Emit only the fixed endpoint and class name.
+                detail = (f'Artlist 网页代理请求失败（{method} {path.rsplit("/",1)[-1]}；'
+                          f'{type(exc).__name__}；第 {attempt} 次；累计 {time.monotonic()-started:.2f} 秒）')
+                self.db.event('web_request_retry' if retry else 'web_request_failed',
+                              detail, self.account_id, web_task_context.get())
+                if not retry:
+                    raise GatewayError(detail, 'proxy_error', 502,
+                                       retryable=isinstance(exc, TRANSIENT_TRANSPORT_ERRORS)) from None
+                # Release the account cookie lock before waiting, so other
+                # tasks can continue polling through the same fixed proxy.
+                await asyncio.sleep(attempt)
+            else:
+                if attempt > 1:
+                    self.db.event('web_request_recovered',
+                                  f'{method} {path.rsplit("/",1)[-1]}：第 {attempt} 次恢复，累计 {time.monotonic()-started:.2f} 秒',
+                                  self.account_id, web_task_context.get())
+                return response
 
     async def _request(self, method, path, **kwargs):
         secret = self.secret()
@@ -83,11 +133,8 @@ class WebClient:
                    'Origin': BASE, 'Referer': BASE+'/', 'x-trpc-source': 'react', 'x-request-id': str(uuid.uuid4())}
         if path != '/api/auth/session' and (not path.startswith('/api/trpc/') or path.removeprefix('/api/trpc/') not in PROCEDURES):
             raise ValueError('网页接口不在已采集的接口清单中')
-        try:
-            async with client(secret['proxy_url'], self.settings.request_timeout, headers=headers) as http:
-                response = await http.request(method, BASE+path, **kwargs)
-        except httpx.TransportError:
-            raise GatewayError('Artlist 网页代理连接失败', 'proxy_error', 502, retryable=True) from None
+        async with client(secret['proxy_url'], self.settings.request_timeout, headers=headers) as http:
+            response = await http.request(method, BASE+path, **kwargs)
         if response.status_code == 401:
             self.db.update_account(self.account_id, enabled=False, status='unauthorized', last_error='网页登录已失效，请重新登录')
             raise GatewayError('Artlist 网页登录已失效', 'reauthorization_required', 401)

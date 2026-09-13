@@ -12,7 +12,7 @@ from app.errors import GatewayError
 from app.mcp import MCPClient
 from app.network import client, safe_error
 from app.oauth import OAuth
-from app.web import WebClient
+from app.web import WebClient, web_task_context
 from app.web_catalog import profiles as web_profiles, validate_request as validate_web_request
 
 
@@ -171,6 +171,7 @@ class Service:
 
     async def run(self, task_id):
         task = self.db.task(task_id)
+        context_token = web_task_context.set(task_id)
         try:
             account = self.db.account(task['account_id'], True)
             if account['proxy_version'] != task['proxy_version']:
@@ -254,6 +255,8 @@ class Service:
             message = safe_error(exc, [v for v in credentials.values() if isinstance(v, str)])
             self.db.update_task(task_id, status=status, error=message, error_code=code)
             self.db.event(status, message, task['account_id'], task_id)
+        finally:
+            web_task_context.reset(context_token)
 
     async def recover_unknown(self, task_id, upstream_id):
         task = self.db.task(task_id)
