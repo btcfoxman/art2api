@@ -22,7 +22,7 @@ class Settings:
     browser_timeout: int = 900
     sd25_video_policy: str = 'adjust'
     oauth_client_id: str = field(default_factory=lambda: os.getenv("ART_OAUTH_CLIENT_ID", ""))
-    version: str = "0.3.9"
+    version: str = "0.3.10"
 
     def validate(self):
         if len(self.api_key) < 24 or len(self.admin_token) < 24:

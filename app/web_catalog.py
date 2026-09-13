@@ -82,19 +82,20 @@ def reference_prompt(request):
         prompt = re.sub(r'@(?:'+aliases+r')(\d+)(?![0-9A-Za-z_])', replace, prompt, flags=re.IGNORECASE)
     order = {'image_urls':0, 'video_urls':1, 'audio_urls':2}
     tags = [{'tagId':f'{prefix}{index}', 'type':prefix, 'orderForType':index}
-            for field,prefix,index in sorted(referenced,key=lambda value:(order[value[0]],value[2]))]
-    header = audio_reference_header(request, tags)
+            for field,prefix,index in sorted(referenced,key=lambda value:(order[value[0]],-len(str(value[2])),value[2]))]
+    header = reference_header(request, tags)
     if header and not prompt.startswith(header):
-        # Seedance 2.5 can fail mapping audio references near the end of a
-        # long prompt. Keep a leading index of ONLY already-mentioned audio
-        # tags, retaining the complete prompt and the original asset indices.
+        # Give upstream mapping an early, whitespace-delimited occurrence of
+        # every used tag. Longer indices precede their prefixes (@img10/@img1),
+        # while orderForType continues to identify the original asset.
         prompt = header + prompt
     return prompt, tags
 
 
-def audio_reference_header(request, tags):
-    audio = [tag['tagId'] for tag in tags if tag['type'] == '@aud']
-    return ' '.join(audio) + '\n' if GROUPS[request['model']] == 515 and audio else ''
+def reference_header(request, tags):
+    # Preserve the proven leading-audio workaround when other media are present.
+    ordered = sorted(tags, key=lambda tag: tag['type'] != '@aud')
+    return ' '.join(tag['tagId'] for tag in ordered) + '\n' if tags else ''
 
 
 def quote_input(request, assets):

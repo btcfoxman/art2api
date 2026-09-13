@@ -162,7 +162,7 @@ function openTaskDetail(task) {
   if (!task) return;
   const fields = [['本地任务', task.id],['上游任务', task.upstream_id || '—'],['账号', state.accounts.find(a => a.id === task.account_id)?.name || task.account_id],['模型', task.model],['生成参数', `${task.request.duration} 秒 · ${task.request.resolution} · ${task.request.aspect_ratio}`],['状态', labels[task.internal_status] || task.internal_status],['创建 / 更新', `${stamp(task.created_at)} / ${stamp(task.updated_at)}`]];
   if (task.error) fields.push(['错误代码', task.error.code],['错误详情', task.error.message]);
-  if (task.prompt_processing) fields.push(['音频引用兼容处理', `${task.prompt_processing.action}（${task.prompt_processing.tags.join('、')}）`]);
+  if (task.prompt_processing) fields.push([task.prompt_processing.policy === 'audio_reference_header' ? '音频引用兼容处理' : '引用标签兼容处理', `${task.prompt_processing.action}（${task.prompt_processing.tags.join('、')}）`]);
   if (task.preparation_timing) {
     const t = task.preparation_timing, seconds = n => `${Number(n).toFixed(2)} 秒`;
     fields.push(['准备期耗时', [['总计',t.total_seconds],['素材处理',t.media_seconds],['网页验证',t.verification_seconds],['报价校验',t.quote_seconds],['额度检查与建会话',t.eligibility_and_session_seconds]].filter(([,n]) => Number.isFinite(n)).map(([name,n]) => `${name} ${seconds(n)}`).join('；')]);
