@@ -1,7 +1,7 @@
 const $ = (selector) => document.querySelector(selector);
 const state = {accounts: [], tasks: [], settings: {}, browserAccount: null, profileAccount: null};
 let toastTimer, browserTimer, browserBlob;
-const labels = {ready:'可用',unauthorized:'等待授权',unchecked:'待检测',error:'连接异常',proxy_conflict:'出口重复',queued:'排队',preparing:'准备',submitting:'提交中',running:'生成中',succeeded:'已完成',failed:'失败',submission_unknown:'结果未知'};
+const labels = {ready:'可用',unauthorized:'等待授权',oauth_client_required:'需要 OAuth 客户端',unchecked:'待检测',error:'连接异常',proxy_conflict:'出口重复',queued:'排队',preparing:'准备',submitting:'提交中',running:'生成中',succeeded:'已完成',failed:'失败',submission_unknown:'结果未知'};
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const stamp = value => value ? new Date(value*1000).toLocaleString('zh-CN',{hour12:false}) : '—';
 function toast(message) { clearTimeout(toastTimer); $('#toast').textContent=message; $('#toast').hidden=false; toastTimer=setTimeout(()=>$('#toast').hidden=true,7000); }

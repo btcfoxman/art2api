@@ -143,3 +143,43 @@ def test_api_and_admin_are_separate_and_metadata_has_no_secrets(settings):
         http.post('/login',data={'token':settings.admin_token})
         assert http.post('/api/accounts',json={'name':'a','proxy_url':'socks5://xray:20001'}).status_code==403
         assert http.post('/api/accounts',headers={'X-Requested-With':'art2api'},json={'name':'a','proxy_url':''}).status_code==422
+
+
+@pytest.mark.asyncio
+async def test_manual_recovery_renews_deadline_without_resubmission(db, settings):
+    account=ready(db)
+    request=normalize_request({'model':MODEL,'prompt':'sunrise','duration':5})
+    task,_=db.create_task(request,[(account['id'],PROFILE)],'recover',10)
+    db.update_task(task['id'],status='submission_unknown',upstream_id='original')
+    db.conn.execute('UPDATE tasks SET created_at=? WHERE id=?',(time.time()-7200,task['id']))
+    service=Service(db,settings)
+    fake=AsyncMock()
+    fake.call.return_value={'status':'completed','video_url':'https://example.com/recovered.mp4'}
+    service.mcp=lambda _:fake
+    with pytest.raises(ValueError):
+        await service.recover_unknown(task['id'],'different')
+    await service.recover_unknown(task['id'],'original')
+    await asyncio.gather(*list(service.jobs.values()))
+    assert db.task(task['id'])['status']=='succeeded'
+    fake.call.assert_awaited_once_with('video_status',{'generation_id':'original'})
+
+
+@pytest.mark.asyncio
+async def test_oauth_pkce_state_is_single_use_and_tokens_stay_private(db, settings):
+    from urllib.parse import parse_qs, urlsplit
+    from app.oauth import OAuth
+    account=db.save_account({'name':'OAuth account','proxy_url':'socks5://xray:20001'})
+    oauth=OAuth(db,settings)
+    oauth.discover=AsyncMock(return_value={
+        'authorization_endpoint':'https://auth.artlist.io/authorize',
+        'token_endpoint':'https://auth.artlist.io/oauth/token',
+        'resource':'https://mcp.artlist.io/', 'client_id_metadata_document_supported':True})
+    query=parse_qs(urlsplit(await oauth.begin(account['id'])).query)
+    assert query['code_challenge_method']==['S256']
+    assert query['client_id']==[settings.public_base_url+'/oauth/client-metadata.json']
+    oauth.request=AsyncMock(return_value={'access_token':'private-oauth-token','refresh_token':'private-refresh','expires_in':3600})
+    await oauth.callback(query['state'][0],'authorization-code')
+    assert oauth.request.await_args.kwargs['data']['code_verifier']
+    assert 'private-oauth-token' not in json.dumps(db.account(account['id']))
+    with pytest.raises(ValueError):
+        await oauth.callback(query['state'][0],'authorization-code')

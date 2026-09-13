@@ -31,7 +31,9 @@ Artlist MCP Seedance 视频网关。独立账号、强制固定代理、OAuth �
 
 代理不通不会回退直连。多个账号检测到同一出口时不会接新任务。出口检测仅为最近检测快照；固定独立 IP 需要代理服务保证。Chromium 授权支持 HTTP 代理认证或无认证 SOCKS5；带认证 SOCKS5 请提供相同出口的 HTTP 接口。
 
-Artlist 当前公布动态注册地址但实际禁用了动态注册。网关优先使用其声明支持的 OAuth Client ID Metadata Document，公开地址位于 `/oauth/client-metadata.json`。亦可通过 `ART_OAUTH_CLIENT_ID` 使用合法预注册客户端；回调必须注册为 `ART_PUBLIC_BASE_URL/oauth/callback`。
+2026-09-13 的实际接入验证发现：Artlist 公布了动态注册地址，但接口返回动态注册已关闭；元数据声明支持 OAuth Client ID Metadata Document，但自建客户端仍被授权页拒绝为 `Unknown client`。网关保留标准元数据方式（`/oauth/client-metadata.json`），当前部署需要 Artlist 接受的自建应用 Client ID。通过 `ART_OAUTH_CLIENT_ID` 配置合法预注册的公共 OAuth 客户端，并将回调注册为 `ART_PUBLIC_BASE_URL/oauth/callback`。账号密码和代理本身不足以完成客户端注册。官方目前列出的受支持客户端为 Claude、ChatGPT 和 VS Code，详见 [Artlist MCP 接入说明](https://help.artlist.io/hc/en-us/articles/38948588333469-Artlist-MCP-Connect-Claude-ChatGPT-and-VS-Code-to-Artlist)。
+
+在 OAuth 客户端获准前，部署可以运行、管理账号和检测代理，但真实 MCP 工具列表及生成验收尚不能完成，账号与 lingya2api 渠道应保持停用。
 
 ## 模型能力
 

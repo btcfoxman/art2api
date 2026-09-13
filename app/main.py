@@ -177,8 +177,12 @@ def create_app(settings=None):
 
     @app.post('/api/accounts/{account_id}/connect', dependencies=[Depends(admin)])
     async def connect(account_id: str):
-        url = await service.oauth.begin(account_id)
-        await service.browsers.open(account_id, url)
+        try:
+            url = await service.oauth.begin(account_id)
+            await service.browsers.open(account_id, url)
+        except GatewayError as exc:
+            db.update_account(account_id, enabled=False, status='oauth_client_required' if exc.code == 'oauth_client_required' else 'error', last_error=safe_error(exc))
+            raise
         return {'status': 'browser_ready', 'account_id': account_id}
 
     @app.get('/api/accounts/{account_id}/browser', dependencies=[Depends(admin)])

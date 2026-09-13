@@ -68,7 +68,8 @@ class Service:
                 raise ValueError('该出口 IP 已被其他账号使用')
             if not account['authorized']:
                 await self.oauth.discover(account)
-                self.db.update_account(account_id, status='unauthorized', last_error='代理正常，等待 Artlist 授权')
+                if account['status'] != 'oauth_client_required':
+                    self.db.update_account(account_id, status='unauthorized', last_error='代理正常，等待 Artlist 授权')
                 return self.db.account(account_id)
             tools = await self.mcp(account_id).list_tools()
             self.db.update_account(account_id, tools=tools, status='ready', last_error='')
@@ -140,7 +141,7 @@ class Service:
                 self.db.event('upstream_submitted', 'Artlist generation ID persisted', account['id'], task_id)
             failures = 0
             while not self.stopping:
-                if time.time() - task['created_at'] > self.settings.task_timeout:
+                if time.time() > (task['query_deadline'] or task['created_at'] + self.settings.task_timeout):
                     raise GatewayError('Artlist generation query deadline exceeded', 'upstream_outcome_unknown', ambiguous=True)
                 try:
                     tools = self.db.account(account['id'])['tools']
@@ -183,7 +184,9 @@ class Service:
             raise ValueError('只可恢复结果未知且已停止本地查询的任务')
         if not upstream_id:
             raise ValueError('必须提供该账号真实的 Artlist generation ID')
-        self.db.update_task(task_id, upstream_id=upstream_id, status='running', error='', error_code='')
+        if task['upstream_id'] and task['upstream_id'] != upstream_id:
+            raise ValueError('恢复查询不能更换已绑定的 Artlist generation ID')
+        self.db.update_task(task_id, upstream_id=upstream_id, status='running', error='', error_code='', query_deadline=time.time() + self.settings.task_timeout)
         self.schedule(task_id)
         return self.public_task(self.db.task(task_id))
 
@@ -192,7 +195,7 @@ class Service:
             await asyncio.sleep(15)
             await self.browsers.cleanup()
             for task in self.db.tasks(active=True):
-                if time.time() - task['created_at'] > self.settings.task_timeout and task['status'] != 'submission_unknown':
+                if time.time() > (task['query_deadline'] or task['created_at'] + self.settings.task_timeout) and task['status'] != 'submission_unknown':
                     job = self.jobs.get(task['id'])
                     if job:
                         job.cancel()

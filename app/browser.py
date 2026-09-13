@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 from playwright.async_api import async_playwright
 
 from app.network import browser_proxy
+from app.errors import GatewayError
 
 
 class BrowserManager:
@@ -36,6 +37,8 @@ class BrowserManager:
             self.sessions[account_id] = {'context': context, 'page': page, 'expires': time.time() + self.settings.browser_timeout}
             try:
                 await page.goto(authorization_url, wait_until='domcontentloaded', timeout=60000)
+                if 'unknown client:' in (await page.content()).lower():
+                    raise GatewayError('Artlist 未接受此 OAuth 客户端。请申请自建应用的 Client ID，并配置 ART_OAUTH_CLIENT_ID；账号密码不能替代客户端注册。', 'oauth_client_required', 422)
             except Exception:
                 await self.close(account_id)
                 raise
@@ -84,4 +87,3 @@ class BrowserManager:
             await self.close(account_id)
         if self.playwright:
             await self.playwright.stop()
-

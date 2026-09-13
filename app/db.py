@@ -60,6 +60,9 @@ class Database:
                 kind TEXT NOT NULL, detail TEXT NOT NULL, created_at REAL NOT NULL
             );
         """)
+        columns = {row[1] for row in self.conn.execute('PRAGMA table_info(tasks)')}
+        if 'query_deadline' not in columns:
+            self.conn.execute('ALTER TABLE tasks ADD COLUMN query_deadline REAL NOT NULL DEFAULT 0')
 
     @contextmanager
     def transaction(self):
@@ -219,7 +222,7 @@ class Database:
             return self.task(task_id), True
 
     def update_task(self, task_id, **fields):
-        if not fields.keys() <= {'status','upstream_id','result','error','error_code'}:
+        if not fields.keys() <= {'status','upstream_id','result','error','error_code','query_deadline'}:
             raise ValueError('invalid task fields')
         with self.transaction() as con:
             for key,value in fields.items():
