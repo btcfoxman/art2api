@@ -86,8 +86,8 @@ def reference_prompt(request):
     header = reference_header(request, tags)
     if header and not prompt.startswith(header):
         # Give upstream mapping an early, whitespace-delimited occurrence of
-        # every used tag. Longer indices precede their prefixes (@img10/@img1),
-        # while orderForType continues to identify the original asset.
+        # every used tag. The header uses natural indices; the mapping list
+        # handles longer tags first. Asset bindings remain unchanged.
         prompt = header + prompt
     return prompt, tags
 
@@ -168,8 +168,14 @@ def generation_result(data):
         if code == 'FILE_OPTIMIZATION_FAILED':
             message = 'Artlist 参考素材预处理失败'
             reason = str(data.get('reason', '')).lower()
-            if 'input audio' in reason and 'sensitive' in reason:
-                message = 'Artlist 参考音频审核未通过，请检查音频素材'
+            for media, label in [('video', '视频'), ('audio', '音频'), ('image', '图片')]:
+                if f'input {media}' not in reason:
+                    continue
+                if 'copyright' in reason:
+                    message = f'Artlist 拒绝参考{label}：可能涉及版权限制，请检查{label}素材'
+                elif 'sensitive' in reason:
+                    message = f'Artlist 参考{label}审核未通过，请检查{label}素材'
+                break
         if code=='MAP_INTERNAL_REQUEST_TO_PROVIDER_REQUEST_FAILED' and 'Reference tag not found in prompt' in str(data.get('reason','')):
             message = 'Artlist 提示词引用标签与素材不一致'
         if code:

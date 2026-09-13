@@ -415,6 +415,11 @@ async def test_generation_failure_preserves_safe_upstream_code_without_signed_ur
     audio=generation_result({'status':'Failed','errorCode':'FILE_OPTIMIZATION_FAILED',
                              'reason':'Asset processing returned Failed: the input audio may contain sensitive information https://private.example'})
     assert '参考音频审核未通过' in audio['error_message'] and 'private.example' not in str(audio)
+    input_video=generation_result({'status':'Failed','errorCode':'FILE_OPTIMIZATION_FAILED',
+                                   'reason':'Asset processing returned a Failed status. Details: The request failed because the input video may be related to copyright restrictions. https://private.example/?signature=secret'})
+    assert '参考视频' in input_video['error_message'] and '版权限制' in input_video['error_message']
+    assert input_video['upstream_error_code']=='FILE_OPTIMIZATION_FAILED'
+    assert 'private.example' not in str(input_video) and 'signature' not in str(input_video)
     optimization=generation_result({'status':'Failed','errorCode':'FILE_OPTIMIZATION_FAILED','reason':'other failure'})
     assert '预处理失败' in optimization['error_message'] and '审核' not in optimization['error_message']
 
