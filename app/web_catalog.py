@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from app.catalog import PUBLIC_MODELS
@@ -101,7 +102,15 @@ def generation_payload(session_id, quote, inputs, settings, artifacts, verificat
 def generation_result(data):
     state = str(data.get('status', '')).lower()
     if state in {'failed', 'error', 'cancelled', 'canceled', 'rejected'}:
-        return {'status': 'failed', 'error_code': 'generation_failed'}
+        code = str(data.get('errorCode') or '')
+        code = code if re.fullmatch(r'[A-Z][A-Z0-9_]{0,79}',code) else ''
+        # Reasons can contain signed media URLs. Expose the structured code and
+        # a safe explanation, never the arbitrary upstream reason string.
+        message = 'Artlist 无法读取参考素材' if code=='INPUT_URL_UNREACHABLE' else 'Artlist 明确报告生成失败'
+        if code:
+            message += f'（{code}）'
+        return {'status':'failed','error_code':'generation_failed','error_message':message,
+                'upstream_error_code':code,'upstream_status':state}
     if state in {'completed', 'succeeded', 'success'}:
         outputs = data.get('outputs') or []
         output = next((o for o in outputs if o.get('fileUrl') and o.get('generationType') == 'generatedVideo'), None)

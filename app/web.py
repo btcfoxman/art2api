@@ -10,7 +10,7 @@ from datetime import datetime
 from fractions import Fraction
 from http.cookies import SimpleCookie
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 import httpx
 from jsonschema import Draft202012Validator, ValidationError
@@ -25,7 +25,7 @@ BASE = 'https://toolkit.artlist.io'
 PROCEDURES = {
     'dynamicPromptSettings.getDynamicPromptSettings', 'modelRouter.getModelGroups',
     'modelRouter.getModel', 'modelRouter.getCostQuote', 'userGenerationRouter.checkGenerationEligibility',
-    'uploadRouter.getPresignedUrl', 'chatSession.createChatSession',
+    'uploadRouter.getPresignedUrl', 'uploadRouter.getPresignedUrlFromKey', 'chatSession.createChatSession',
     'userGenerationRouter.createUserGeneration', 'userGenerationRouter.getUserGenerationById',
     'userGenerationRouter.getUserGenerationOutputById', 'userGenerationRouter.getUserGenerationsBySession',
 }
@@ -281,7 +281,23 @@ class WebClient:
             response=await http.put(target,content=bytes(content),headers={'Content-Type':mime})
             if not 200<=response.status_code<300:
                 raise ValueError('Artlist 参考素材上传失败')
-            return {'file_key':signed['fileKey'],'file_url':public_media_url(signed['fileUrl']),'metadata':metadata}
+            # The bucket is private: fileUrl is an unsigned object location and
+            # presignedUrl above authorizes PUT only. Match the captured browser
+            # flow by obtaining a separate GET signature after the upload.
+            preview=await self.rpc('uploadRouter.getPresignedUrlFromKey',
+                                   {'fileKey':signed['fileKey'],'expiresIn':86400},post=True)
+            readable=public_media_url(preview.get('presignedUrl',''))
+            location,uploaded=urlsplit(readable),urlsplit(target)
+            query=parse_qs(location.query)
+            if (location.scheme!='https' or location.netloc!=uploaded.netloc or location.path!=uploaded.path
+                    or not query.get('X-Amz-Signature') or query.get('x-id')!=['GetObject']):
+                raise GatewayError('Artlist 未返回对应素材的有效下载签名', 'media_signature_invalid', 422)
+            # Verify access without Artlist session headers before any billable
+            # generation; a signed GET must not be tested with unsigned HEAD.
+            async with http.stream('GET',readable,headers={'Range':'bytes=0-0'}) as access:
+                if access.status_code not in {200,206}:
+                    raise GatewayError(f'Artlist 上传素材不可读取（HTTP {access.status_code}）', 'media_unreachable', 422)
+            return {'file_key':signed['fileKey'],'file_url':readable,'metadata':metadata}
 
     async def prepare(self, task):
         request=task['request']

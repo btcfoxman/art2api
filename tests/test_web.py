@@ -3,6 +3,7 @@ import json
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
+from urllib.parse import parse_qs
 
 import httpx
 import pytest
@@ -98,6 +99,114 @@ def test_captured_completed_response_and_pending_output_are_distinct():
     assert generation_result({'status':'Failed'})['status']=='failed'
     with pytest.raises(GatewayError) as error: generation_result({'status':'something-new'})
     assert error.value.retryable
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kind', ['image', 'video', 'audio'])
+async def test_uploaded_media_uses_separate_get_signature_and_checks_readability(setup, kind):
+    db,settings,aid=setup
+    source='https://media.example/reference'
+    stored='https://artlist-prod-ai-toolkit-custom-user-uploads.s3.eu-central-1.amazonaws.com/object'
+    write_url=stored+'?X-Amz-Signature=private-upload&x-id=PutObject'
+    read_url=stored+'?X-Amz-Signature=private-download&x-id=GetObject'
+    seen=[]
+    def responder(request):
+        seen.append(request)
+        if request.url.host=='toolkit.artlist.io':
+            name=request.url.path.rsplit('/',1)[-1]
+            payload=json.loads(request.content)['json']
+            if name=='uploadRouter.getPresignedUrl':
+                data={'presignedUrl':write_url,'fileUrl':stored,'fileKey':'object'}
+            else:
+                assert name=='uploadRouter.getPresignedUrlFromKey'
+                assert payload=={'fileKey':'object','expiresIn':86400}
+                assert any(r.method=='PUT' for r in seen)
+                data={'presignedUrl':read_url}
+            return httpx.Response(200,json={'result':{'data':{'json':data}}})
+        assert 'cookie' not in request.headers and 'authorization' not in request.headers
+        if str(request.url)==source:
+            return httpx.Response(200,content=b'media',headers={'content-type':kind+('/png' if kind=='image' else '/mp4' if kind=='video' else '/mpeg')})
+        if request.method=='PUT':
+            assert str(request.url)==write_url and request.content==b'media'
+            return httpx.Response(200)
+        assert str(request.url)==read_url and request.method=='GET'
+        assert request.headers['range']=='bytes=0-0'
+        return httpx.Response(206,content=b'm')
+    def factory(proxy,*args,**kwargs):
+        assert proxy=='socks5://xray:20001'
+        return httpx.AsyncClient(transport=httpx.MockTransport(responder),**kwargs)
+    probe=AsyncMock()
+    probe.returncode=0
+    probe.communicate.return_value=(json.dumps({'streams':[{'codec_type':'video','width':1280,'height':720,'avg_frame_rate':'24/1'}],
+                                               'format':{'duration':'4.0'}}).encode(),b'')
+    with patch('app.web.client',factory),patch('app.web.asyncio.create_subprocess_exec',AsyncMock(return_value=probe)):
+        asset=await WebClient(aid,db,settings).upload(source,kind)
+    assert asset['file_url']==read_url
+    request=normalize_request({'model':MODEL,'prompt':'reference test','duration':4})
+    _,inputs,settings,artifacts=quote_input(request,{kind+'_urls':[asset]})
+    assert inputs[kind+'_urls'][0]['fileUrl']==read_url
+    assert artifacts[0]['metadata']['fileUrl']==read_url
+    assert parse_qs(read_url.split('?',1)[1])['x-id']==['GetObject']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure', ['unreadable', 'unsigned', 'wrong_object', 'put_signature'])
+async def test_invalid_uploaded_media_never_reaches_generation(setup, failure):
+    db,settings,aid=setup
+    stored='https://artlist-prod-ai-toolkit-custom-user-uploads.s3.eu-central-1.amazonaws.com/object'
+    preview=stored+'?X-Amz-Signature=download&x-id=GetObject'
+    preview={'unsigned':stored,'wrong_object':preview.replace('/object?','/other?'),
+             'put_signature':preview.replace('GetObject','PutObject')}.get(failure,preview)
+    called=[]
+    def responder(request):
+        if request.url.host=='toolkit.artlist.io':
+            name=request.url.path.rsplit('/',1)[-1];called.append(name)
+            if name=='uploadRouter.getPresignedUrl':
+                data={'presignedUrl':stored+'?x-id=PutObject','fileKey':'object','fileUrl':stored}
+            else:
+                assert name=='uploadRouter.getPresignedUrlFromKey'
+                data={'presignedUrl':preview}
+            return httpx.Response(200,json={'result':{'data':{'json':data}}})
+        if request.url.host=='media.example':
+            return httpx.Response(200,content=b'image',headers={'content-type':'image/png'})
+        return httpx.Response(200 if request.method=='PUT' else 403)
+    def factory(*args,**kwargs):
+        return httpx.AsyncClient(transport=httpx.MockTransport(responder),**kwargs)
+    probe=AsyncMock();probe.returncode=0
+    probe.communicate.return_value=(b'{"streams":[{"codec_type":"video","width":1280,"height":720}]}',b'')
+    service=Service(db,settings)
+    service.browsers.generation_verification=AsyncMock()
+    with patch('app.web.client',factory),patch('app.web.asyncio.create_subprocess_exec',AsyncMock(return_value=probe)):
+        task=await service.create({'model':MODEL,'prompt':'test','image_urls':['https://media.example/image.png']},'bad-media')
+        await asyncio.gather(*list(service.jobs.values()))
+    task=db.task(task['id'])
+    assert task['status']=='failed' and not task['upstream_id']
+    assert task['error_code']==('media_unreachable' if failure=='unreadable' else 'media_signature_invalid')
+    assert called==['uploadRouter.getPresignedUrl','uploadRouter.getPresignedUrlFromKey']
+    service.browsers.generation_verification.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_generation_failure_preserves_safe_upstream_code_without_signed_url(setup):
+    db,settings,aid=setup
+    data={'status':'Failed','errorCode':'INPUT_URL_UNREACHABLE',
+          'reason':'Input URL unreachable (HTTP 403): https://storage.example/image?X-Amz-Signature=private-signature'}
+    result=generation_result(data)
+    assert result['upstream_error_code']=='INPUT_URL_UNREACHABLE'
+    assert 'INPUT_URL_UNREACHABLE' in result['error_message']
+    assert 'private-signature' not in json.dumps(result) and 'storage.example' not in json.dumps(result)
+    task,_=db.create_task(normalize_request({'model':MODEL,'prompt':'test'}),[(aid,profiles()[MODEL])],'failed-generation',10)
+    db.update_task(task['id'],status='running',upstream_id='original-generation',result={'resolved_model_id':3011})
+    service=Service(db,settings);web=AsyncMock();web.query.return_value=result
+    service.web=lambda _:web
+    await service.run(task['id'])
+    stored=db.task(task['id'])
+    assert stored['result']['resolved_model_id']==3011
+    assert stored['result']['upstream_error_code']=='INPUT_URL_UNREACHABLE'
+    assert 'INPUT_URL_UNREACHABLE' in service.public_task(stored)['error']['message']
+    web.submit.assert_not_awaited()
+    unsafe=generation_result({'status':'Failed','errorCode':'private-token\nURL https://private.example'})
+    assert unsafe['upstream_error_code']=='' and 'private-token' not in unsafe['error_message']
 
 
 @pytest.mark.asyncio

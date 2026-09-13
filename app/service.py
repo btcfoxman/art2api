@@ -223,7 +223,14 @@ class Service:
                         self.db.event('task_succeeded', 'Video result ready', account['id'], task_id)
                         return
                     if status == 'failed':
-                        self.db.update_task(task_id, status='failed', error='Artlist explicitly reported generation failure', error_code='generation_failed')
+                        message = data.get('error_message') if web else None
+                        result = {**self.db.task(task_id)['result'], **({
+                            'upstream_error_code':data.get('upstream_error_code',''),
+                            'upstream_status':data.get('upstream_status',''),
+                        } if web else {})}
+                        self.db.update_task(task_id, status='failed', result=result,
+                                            error=message or 'Artlist explicitly reported generation failure', error_code='generation_failed')
+                        self.db.event('generation_failed', message or 'Artlist explicitly reported generation failure', account['id'], task_id)
                         return
                 except GatewayError as exc:
                     if not exc.retryable and exc.code != 'reauthorization_required':
