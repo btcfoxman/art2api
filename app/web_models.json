@@ -1,0 +1,349 @@
+{
+  "captured_at": "2026-09-13",
+  "groups": {
+    "358": {
+      "settings": {
+        "prompt": {
+          "values": [],
+          "max": null
+        },
+        "resolution": {
+          "values": [
+            "480p",
+            "720p",
+            "1080p",
+            "4k"
+          ],
+          "max": null
+        },
+        "duration": {
+          "values": [
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+            "10",
+            "11",
+            "12",
+            "13",
+            "14",
+            "15"
+          ],
+          "max": null
+        },
+        "generate_audio": {
+          "values": [
+            "true",
+            "false"
+          ],
+          "max": null
+        },
+        "video_urls": {
+          "values": [],
+          "max": null
+        },
+        "audio_urls": {
+          "values": [],
+          "max": null
+        },
+        "image_urls": {
+          "values": [],
+          "max": null
+        },
+        "aspect_ratio": {
+          "values": [
+            "16:9",
+            "9:16",
+            "4:3",
+            "3:4",
+            "1:1",
+            "21:9"
+          ],
+          "max": null
+        },
+        "image_url": {
+          "values": [],
+          "max": null
+        },
+        "end_frame": {
+          "values": [],
+          "max": null
+        }
+      },
+      "defaults": {
+        "prompt": "",
+        "resolution": "720p",
+        "duration": "5",
+        "generate_audio": "true",
+        "aspect_ratio": "16:9"
+      }
+    },
+    "377": {
+      "settings": {
+        "prompt": {
+          "values": [],
+          "max": 5000
+        },
+        "generation_mode": {
+          "values": [
+            "endframe",
+            "references"
+          ],
+          "max": null
+        },
+        "resolution": {
+          "values": [
+            "480p",
+            "720p"
+          ],
+          "max": null
+        },
+        "aspect_ratio": {
+          "values": [
+            "auto",
+            "16:9",
+            "9:16",
+            "1:1",
+            "4:3",
+            "3:4",
+            "21:9"
+          ],
+          "max": null
+        },
+        "duration": {
+          "values": [
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+            "10",
+            "11",
+            "12",
+            "13",
+            "14",
+            "15"
+          ],
+          "max": null
+        },
+        "generate_audio": {
+          "values": [
+            "true",
+            "false"
+          ],
+          "max": null
+        },
+        "image_urls": {
+          "values": [],
+          "max": 9
+        },
+        "video_urls": {
+          "values": [],
+          "max": 3
+        },
+        "audio_urls": {
+          "values": [],
+          "max": null
+        },
+        "image_url": {
+          "values": [],
+          "max": null
+        },
+        "end_frame": {
+          "values": [],
+          "max": null
+        }
+      },
+      "defaults": {
+        "prompt": "",
+        "generation_mode": "references",
+        "resolution": "720p",
+        "aspect_ratio": "auto",
+        "duration": "5",
+        "generate_audio": "true"
+      }
+    },
+    "416": {
+      "settings": {
+        "aspect_ratio": {
+          "values": [
+            "16:9",
+            "9:16",
+            "4:3",
+            "3:4",
+            "1:1",
+            "21:9"
+          ],
+          "max": null
+        },
+        "resolution": {
+          "values": [
+            "480p",
+            "720p"
+          ],
+          "max": null
+        },
+        "duration": {
+          "values": [
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+            "10",
+            "11",
+            "12",
+            "13",
+            "14",
+            "15"
+          ],
+          "max": null
+        },
+        "generation_mode": {
+          "values": [
+            "references",
+            "endFrame"
+          ],
+          "max": null
+        },
+        "video_urls": {
+          "values": [],
+          "max": null
+        },
+        "audio_urls": {
+          "values": [],
+          "max": null
+        },
+        "image_urls": {
+          "values": [],
+          "max": null
+        },
+        "generate_audio": {
+          "values": [
+            "true",
+            "false"
+          ],
+          "max": null
+        },
+        "prompt": {
+          "values": [],
+          "max": null
+        },
+        "image_url": {
+          "values": [],
+          "max": null
+        },
+        "end_frame": {
+          "values": [],
+          "max": null
+        }
+      },
+      "defaults": {
+        "aspect_ratio": "16:9",
+        "resolution": "480p",
+        "duration": "4",
+        "generation_mode": "references",
+        "generate_audio": "true",
+        "prompt": ""
+      }
+    },
+    "515": {
+      "settings": {
+        "prompt": {
+          "values": [],
+          "max": null
+        },
+        "aspect_ratio": {
+          "values": [
+            "auto",
+            "16:9",
+            "9:16",
+            "4:3",
+            "3:4",
+            "1:1",
+            "21:9"
+          ],
+          "max": null
+        },
+        "duration": {
+          "values": [
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+            "10",
+            "11",
+            "12",
+            "13",
+            "14",
+            "15",
+            "16",
+            "17",
+            "18",
+            "19",
+            "20",
+            "21",
+            "22",
+            "23",
+            "24",
+            "25",
+            "26",
+            "27",
+            "28",
+            "29",
+            "30"
+          ],
+          "max": null
+        },
+        "resolution": {
+          "values": [
+            "480p",
+            "720p",
+            "1080p"
+          ],
+          "max": null
+        },
+        "generate_audio": {
+          "values": [
+            "true",
+            "false"
+          ],
+          "max": null
+        },
+        "video_urls": {
+          "values": [],
+          "max": null
+        },
+        "audio_urls": {
+          "values": [],
+          "max": null
+        },
+        "image_urls": {
+          "values": [],
+          "max": null
+        },
+        "image_url": {
+          "values": [],
+          "max": null
+        },
+        "end_frame": {
+          "values": [],
+          "max": null
+        }
+      },
+      "defaults": {
+        "prompt": "",
+        "aspect_ratio": "auto",
+        "duration": "10",
+        "resolution": "480p",
+        "generate_audio": "true"
+      }
+    }
+  }
+}

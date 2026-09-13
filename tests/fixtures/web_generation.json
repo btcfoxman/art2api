@@ -1,0 +1,12 @@
+{
+  "id": "generation-1",
+  "status": "Completed",
+  "outputs": [
+    {
+      "id": "output-1",
+      "fileUrl": "https://media.example/video.mp4",
+      "generationType": "generatedVideo",
+      "metadata": "{\"fileType\":\"MP4\",\"isUpscaled\":false,\"dimensions\":{\"width\":854,\"height\":480},\"hasAudio\":true,\"requiresUpscale\":true}"
+    }
+  ]
+}

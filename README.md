@@ -1,83 +1,93 @@
 # ART2API
 
-Artlist MCP Seedance 视频网关。独立账号、强制固定代理、OAuth 授权、持久化任务，供 lingya2api 的 ARTAPI 渠道调用。
+独立的 Artlist Seedance 视频渠道，供 lingya2api 的 ARTAPI 卡片调用。默认采用根据用户 CDP 操作记录实现的网页协议；保留可选 MCP 后端。每个账号独立绑定固定代理、会话与任务，代理失败不会直连。
 
-## 部署
+## 配置与部署
 
-参考 ak2api：`pre` 分支推送触发 `.github/workflows/deploy-test.yml`，先运行测试，再构建 GHCR 镜像，交给 `art2api-pre` 专用 runner 部署。
+`pre` 分支推送触发 `.github/workflows/deploy-test.yml`：测试 → 构建并推送 GHCR 镜像 → `art2api-pre` 专用 runner 部署 → 检查 cloudflared 和公开 HTTPS。
 
-- 服务端口：8797
-- 预发布服务器：192.168.3.5
-- 服务目录：`/home/btcfoxman/docker/art2api`
-- 公开控制台：`https://art2api.aiid.edu.kg`
-- Docker 网络：`my-shared-net`
-- 数据挂载：`./data:/app/data`，必须与 `.env` 中的加密密钥一起备份。
+- 控制台：<https://art2api.aiid.edu.kg>
+- 预发布服务器：192.168.3.5；服务端口：8797。
+- 服务目录：`/home/btcfoxman/docker/art2api`；Docker 网络：`my-shared-net`。
+- 数据挂载：`./data:/app/data`。数据库、浏览器 Profile 与 `.env` 均为私有运行数据，备份时保留对应加密密钥。
 
-将 `.env.example` 复制为 `.env`，生成相互独立的 `ART_API_KEY`、`ART_ADMIN_TOKEN`（至少 24 字符）和 Fernet `ART_ENCRYPTION_KEY`。例如使用 Python `secrets.token_urlsafe(32)` 和 `cryptography.fernet.Fernet.generate_key()`。不要将生成值提交到 Git。
+复制 `.env.example` 为 `.env`，配置相互独立的 `ART_API_KEY`、`ART_ADMIN_TOKEN`（各至少 24 字符）和 Fernet `ART_ENCRYPTION_KEY`。运行 `docker compose up -d`。镜像选择由 workflow 的 `IMAGE_*` 临时环境变量传给 Compose，不写入应用 `.env`。
 
-镜像选择由工作流通过 `IMAGE_REGISTRY`、`IMAGE_NAMESPACE`、`IMAGE_NAME`、`IMAGE_TAG` 临时环境变量传给 Compose；应用 `.env` 不保存 `IMAGE_*`。
+本地开发安装 `requirements.txt`，并准备 Chromium/Chrome 与 PATH 中的 `ffprobe`。设置 `ART_CHROME_EXECUTABLE` 后运行 `uvicorn main:app --host 127.0.0.1 --port 8797`。浏览器使用原生 CDP WebSocket，没有 Playwright 依赖。Docker 镜像已包含 Chromium、ffmpeg 和中文字体。
 
-运行：`docker compose up -d`。本地开发安装 `requirements.txt`，设置 `ART_*` 环境变量后运行 `uvicorn main:app --host 127.0.0.1 --port 8797`。本地浏览器运行需要 `playwright install chromium` 或指定 `ART_CHROME_EXECUTABLE`。
+## 账号卡片
 
-## 账号配置
+1. 使用管理密钥登录，添加账号，选择“Artlist 网页”，填写固定代理和最大并发。
+2. 点击“连接账号”，通过该账号代理完成正常网页登录，再点击“保存网页登录”。也可以在“网页登录设置”导入自己同一固定出口下的 Cookie、User-Agent 和可选团队 ID。
+3. “检测连接”核对代理出口、网页登录身份和模型目录，自动加载 10 个模型配置，再启用账号。
+4. 卡片展示接入方式、代理地址、检测出口、登录状态、提交验证状态、模型数量和运行任务。多个账号使用独立代理和浏览器 Profile。
+5. “查询网页任务”接受该账号已有的 Artlist generation ID，直接核对任务状态和输出文件，无须重复生成。
 
-1. 使用管理密钥登录，添加账号名称、固定代理地址和并发数。
-2. 代理必填，支持 `http://user:password@host:port`、`socks5://host:port`，`xray:20001` 自动转换为 SOCKS5。不存在直连或环境代理继承路径。
-3. 点击“连接账号”。服务端为该账号启动独立浏览器 Profile，浏览器、OAuth 和 MCP 使用同一个代理。通过画面和输入栏完成正常 Artlist 登录；出现人工验证时在该窗口完成。
-4. 点击“检测连接”，读取出口 IP 与真实 MCP 工具定义。
-5. 在“模型配置”中读取上游模型目录，登记支持的 Seedance 模型、参数映射、输出路径和能力限制，再启用账号。
+**网页登录与当次生成验证是两个条件。** 2026-09-13 捕获的成功提交包含一次性网页验证令牌。当前实现支持在“网页登录设置”登记本人正常验证取得的未使用令牌，最多保留 4 分钟，仅供一个任务使用；没有自动获取生成验证令牌的流程，因此尚不能无人值守连续生成。缺少验证时在提交前返回 `503 / entitlement_unavailable`，lingya2api 可继续 fallback。账号密码、登录 Cookie 本身不能替代这一条件。
 
-不存储 Artlist 登录密码。OAuth 凭据和代理 URL 使用 Fernet 加密保存；浏览器 Profile 包含会话信息，属于敏感运行数据。数据库、Profile 和环境文件均不提交 Git。
+Cookie、OAuth 令牌、代理认证和网页验证令牌均加密保存，不通过账号查询接口回传。浏览器 Profile 也应作为敏感数据保护。代理支持 HTTP/SOCKS5，`xray:20001` 会规范化为 SOCKS5。CDP 登录浏览器需要无认证的本地代理入口，例如 `socks5://xray:20001`；协议调用支持带认证代理。账号有未结束任务时不能更换代理或切换接入方式；重新登录恢复查询时必须保持同一 Artlist 身份。
 
-代理不通不会回退直连。多个账号检测到同一出口时不会接新任务。出口检测仅为最近检测快照；固定独立 IP 需要代理服务保证。Chromium 授权支持 HTTP 代理认证或无认证 SOCKS5；带认证 SOCKS5 请提供相同出口的 HTTP 接口。
+MCP 为可选后端，地址固定为 `https://mcp.artlist.io/mcp`。该模式仍需要 Artlist 接受的 OAuth Client ID，通过 `ART_OAUTH_CLIENT_ID` 配置，并将回调注册为 `ART_PUBLIC_BASE_URL/oauth/callback`。网页后端不需要 OAuth Client ID。MCP 账号的模型映射根据实际 `tools/list` 手动配置；网页账号自动加载内置映射。
 
-2026-09-13 的实际接入验证发现：Artlist 公布了动态注册地址，但接口返回动态注册已关闭；元数据声明支持 OAuth Client ID Metadata Document，但自建客户端仍被授权页拒绝为 `Unknown client`。网关保留标准元数据方式（`/oauth/client-metadata.json`），当前部署需要 Artlist 接受的自建应用 Client ID。通过 `ART_OAUTH_CLIENT_ID` 配置合法预注册的公共 OAuth 客户端，并将回调注册为 `ART_PUBLIC_BASE_URL/oauth/callback`。账号密码和代理本身不足以完成客户端注册。官方目前列出的受支持客户端为 Claude、ChatGPT 和 VS Code，详见 [Artlist MCP 接入说明](https://help.artlist.io/hc/en-us/articles/38948588333469-Artlist-MCP-Connect-Claude-ChatGPT-and-VS-Code-to-Artlist)。
+## 模型与验证范围
 
-在 OAuth 客户端获准前，部署可以运行、管理账号和检测代理，但真实 MCP 工具列表及生成验收尚不能完成，账号与 lingya2api 渠道应保持停用。
+| 对外模型 | Artlist 模型组 | 默认/固定分辨率 | 当前验证 |
+|---|---|---|---|
+| `doubao-seedance-2-0-fast-260128` | Seedance 2.0 Fast / 377 | 默认 720p | 实时报价 |
+| `doubao-seedance-2-0-260128` | Seedance 2.0 / 358 | 默认 720p | 实时报价 |
+| `doubao-seedance-2-0-260128-4k` | Seedance 2.0 / 358 | 固定 4k | 实时报价 |
+| `doubao-seedance-2-0-mini-260615` | Seedance 2.0 Mini / 416 | 默认 720p | 实时报价 |
+| `doubao-seedance-2-0-fast-260128-480p` | Seedance 2.0 Fast / 377 | 固定 480p | 用户实际生成与结果查询 |
+| `doubao-seedance-2-0-260128-480p` | Seedance 2.0 / 358 | 固定 480p | 实时报价 |
+| `doubao-seedance-2-0-260128-1080p` | Seedance 2.0 / 358 | 固定 1080p | 实时报价 |
+| `sd-2-5` | Seedance 2.5 / 515 | 固定 720p | 实时报价 |
+| `sd-2-5-480p` | Seedance 2.5 / 515 | 固定 480p | 用户实际生成与结果查询 |
+| `sd-2-5-1080p` | Seedance 2.5 / 515 | 固定 1080p | 实时报价 |
 
-## 模型能力
+支持文本、参考图片/视频/音频以及首尾帧参数映射。每次提交重新报价，按报价返回的子模型 ID 和实时 JSON Schema 校验该组合，不硬编码子模型、积分或报价签名。未实操组合根据捕获的模型配置推断实现，仍需实际生成验收；并非所有型号都支持所有素材组合。
 
-首版只暴露 lingya2api 已有的 Seedance 2.0、Fast、Mini、固定分辨率别名，以及 `sd-2-5`、`sd-2-5-480p`、`sd-2-5-1080p`。某个对外名字已登记，不代表 Artlist 账号有该能力；只有该账号实时工具列表和显式模型配置匹配的请求才可提交。
+2.0/Fast/Mini 的时长为 4–15 秒，2.5 为 4–30 秒；分辨率和比例按模型配置校验。固定分辨率别名锁定分辨率。不支持的参数和超出上游限制的素材明确拒绝，不丢弃素材或自动转换成其他型号。`seed`、`fps` 尚未在采集中确认，网页后端拒绝这些生成参数。
 
-模型配置以对外模型名为键。每个值需要：
+## lingya2api 设置
 
-- `submit_tool`、`status_tool`：真实 `tools/list` 返回的工具名称。
-- `upstream_model`：模型查询工具返回的实际模型 ID。
-- `parameters`：对外参数到工具入参的映射，支持点分嵌套路径。
-- `constraints`：`durations`、`resolutions`、`aspect_ratios`，以及 `max_images`、`max_videos`、`max_audios`。
-- `status_id_parameter`：查询工具接收生成 ID 的字段。
-- 可选 `id_path`、`status_path`、`video_url_path`：结构化响应中的字段路径。
-- 可选 `constants`、`status_constants`、`value_map`：上游必需常量和枚举值转换。
+在 ARTAPI 卡片配置：
 
-请求会同时经过模型能力和真实 JSON Schema 校验，不会静默删除素材、改变时长或降低分辨率。不自动将 Fast、Mini 或 2.5 替换为标准模型。
+- Base URL：共享 Docker 网络使用 `http://art2api:8797`，外部调用使用公开 HTTPS 地址。
+- API Key：本服务的 `ART_API_KEY`。
+- Model Map：上表 10 个模型名使用同名映射；默认空对象也会使用内置同名映射。
+- 开关：启用或关闭 ARTAPI。`Channel Routing Rules` 中的 `artapi` 位置决定首选与 fallback 顺序。
 
-## 对外接口
+Artlist 账号、会话和固定代理在 art2api 的账号卡片维护；lingya2api 卡片维护服务地址、服务密钥、模型映射与路由。账号关闭或缺少当次网页验证时不接受新任务，已有生成继续使用原账号、原代理查询。
 
-所有业务接口使用 `Authorization: Bearer <ART_API_KEY>` 或 `X-API-Key`。管理接口仅接受管理登录会话，两者隔离。
+## API
+
+业务接口使用 `Authorization: Bearer <ART_API_KEY>` 或 `X-API-Key`；管理接口使用独立登录会话。
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| GET | `/health` | 进程健康 |
-| GET | `/v1/models` | 当前可接单的模型与能力 |
-| POST | `/v1/videos` | 提交异步任务 |
-| GET | `/v1/videos/{id}` | 查询任务 |
+| GET | `/health` | 健康与版本 |
+| GET | `/v1/models` | 已启用账号的模型能力，含 `verification_required` 与验证范围 |
+| POST | `/v1/videos` | 创建异步任务 |
+| GET | `/v1/videos/{id}` | 查询本地任务 |
 | POST | `/api/v3/contents/generations/tasks` | lingya2api 兼容提交 |
 | GET | `/api/v3/contents/generations/tasks/{id}` | lingya2api 兼容查询 |
+| PUT | `/api/accounts/{id}/web-session` | 管理端导入 Cookie/User-Agent/可选 team_id |
+| POST | `/api/accounts/{id}/web-verification` | 管理端登记一次性验证令牌 |
+| POST | `/api/accounts/{id}/web-quote` | 管理端无素材报价检测，不生成 |
+| GET | `/api/accounts/{id}/web-tasks/{generation_id}` | 管理端查询已有网页任务与输出 |
 
 ```json
-{"model":"doubao-seedance-2-0-260128","prompt":"海边日出，镜头缓慢推进","duration":5,"resolution":"720p","aspect_ratio":"16:9","image_urls":[]}
+{"model":"sd-2-5-480p","prompt":"海边日出，镜头缓慢推进","duration":5,"aspect_ratio":"16:9","image_urls":[],"video_urls":[],"audio_urls":[],"generate_audio":true}
 ```
 
-推荐传 `Idempotency-Key`。同一键与同一规范化请求返回原任务；相同键与不同请求返回 409。任务提交前即持久化账号和代理版本；查询、重启恢复不切换账号。
+可通过请求的 `verification_account_id` 和 `verification_token` 绑定账号并登记当次验证，或预先在管理端登记。令牌不写入任务请求内容。推荐使用 `Idempotency-Key`：同一键与同一规范化请求返回原任务，不会再次提交；相同键与不同请求返回 409。
 
-上游提交中断、缺少生成 ID、查询结果不明会保留 `submission_unknown` 状态，不重新提交。对外返回 `failed` 并携带 `submission_unknown` 或 `upstream_outcome_unknown` 错误码，lingya2api 据此停止自动渠道切换。管理员可填入真实上游生成 ID 恢复查询。
+网页任务先用 generation ID 查询 `getUserGenerationById`，再用 output ID 查询 `getUserGenerationOutputById`，核对两者关联后返回视频地址。进程重启恢复原任务查询。提交中断或接受情况不明时标记 `submission_unknown`，阻止重复扣费与自动 fallback；管理员可补充真实 generation ID 恢复查询。完成状态暂时没有输出时继续查询，低于请求分辨率的输出不作为成功结果返回。
 
-没有可用账号或兼容能力时返回 HTTP 503 / `entitlement_unavailable`，明确表示本次没有提交生成。Artlist 明确失败才按普通失败交给渠道 fallback。
-
-当前部署使用单 Uvicorn 进程。不要让多个服务进程共同使用同一数据库。关闭渠道或账号只停止新提交，不取消 Artlist 已开始的生成。
+当前使用单个 Uvicorn 进程，不支持多个进程共同调度同一 SQLite 数据库。
 
 ## 验证
 
-`python -m pytest tests -q`
+运行 `python -m pytest tests -q`。测试覆盖固定代理、会话加密、模型映射、素材参数、报价/提交字段差异、任务与输出 ID 校验、一次性验证、幂等和未知提交恢复。
 
-核心测试覆盖强制代理、密钥隔离、加密持久化、幂等性、账号与代理绑定、重复出口、能力校验和未知提交结果不重提。真实工具定义、授权及生成验收另在预发布部署执行。
+2026-09-13 使用实际 WebClient 经账号固定代理验证了全部 10 个模型的文本报价与子模型定义，并查询确认用户创建的 Fast 480p、Seedance 2.5 480p 两条任务完成。没有将报价通过视为生成通过；其余分辨率及推断参数组合仍需生成验收。

@@ -9,6 +9,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
+from typing import Literal
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
@@ -28,6 +29,7 @@ class AccountCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     proxy_url: str = Field(min_length=1, max_length=2000)
     max_concurrency: int = Field(default=1, ge=1, le=20)
+    backend: Literal['web', 'mcp'] = 'web'
 
 
 class AccountPatch(BaseModel):
@@ -36,6 +38,19 @@ class AccountPatch(BaseModel):
     proxy_url: str | None = Field(default=None, min_length=1, max_length=2000)
     max_concurrency: int | None = Field(default=None, ge=1, le=20)
     enabled: bool | None = None
+    backend: Literal['web', 'mcp'] | None = None
+
+
+class WebSession(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    cookie: str = Field(min_length=1, max_length=100000)
+    user_agent: str = Field(min_length=1, max_length=1000)
+    team_id: str = Field(default='', max_length=100)
+
+
+class WebVerification(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    token: str = Field(min_length=20, max_length=16000)
 
 
 class BrowserAction(BaseModel):
@@ -61,7 +76,7 @@ def create_app(settings=None):
         db.close()
 
     app = FastAPI(title='ART2API', version=settings.version, lifespan=lifespan,
-                  description='Artlist MCP Seedance gateway with mandatory per-account proxies')
+                  description='Artlist web/MCP Seedance gateway with mandatory per-account proxies')
     app.state.service, app.state.db, app.state.settings = service, db, settings
     app.mount('/static', StaticFiles(directory=static), name='static')
 
@@ -180,12 +195,43 @@ def create_app(settings=None):
     @app.post('/api/accounts/{account_id}/connect', dependencies=[Depends(admin)])
     async def connect(account_id: str):
         try:
-            url = await service.oauth.begin(account_id)
+            url = 'https://toolkit.artlist.io/image-video-generator?mode=video' if db.account(account_id)['backend']=='web' else await service.oauth.begin(account_id)
             await service.browsers.open(account_id, url)
         except GatewayError as exc:
             db.update_account(account_id, enabled=False, status='oauth_client_required' if exc.code == 'oauth_client_required' else 'error', last_error=safe_error(exc))
             raise
         return {'status': 'browser_ready', 'account_id': account_id}
+
+    @app.put('/api/accounts/{account_id}/web-session', dependencies=[Depends(admin)])
+    async def import_web_session(account_id: str, payload: WebSession):
+        return await service.import_web_session(account_id, payload.model_dump())
+
+    @app.post('/api/accounts/{account_id}/browser/save-session', dependencies=[Depends(admin)])
+    async def save_browser_session(account_id: str):
+        if db.account(account_id)['backend']!='web':
+            raise ValueError('仅网页账号可保存网页登录')
+        payload = await service.browsers.session_credentials(account_id)
+        return await service.import_web_session(account_id, payload)
+
+    @app.post('/api/accounts/{account_id}/web-verification', dependencies=[Depends(admin)])
+    async def web_verification(account_id: str, payload: WebVerification):
+        db.save_verification(account_id, payload.token)
+        return db.account(account_id)
+
+    @app.get('/api/accounts/{account_id}/web-tasks/{generation_id}', dependencies=[Depends(admin)])
+    async def web_task(account_id: str, generation_id: str):
+        if db.account(account_id)['backend']!='web':
+            raise ValueError('仅网页账号支持此查询')
+        return await service.web(account_id).query(generation_id)
+
+    @app.post('/api/accounts/{account_id}/web-quote', dependencies=[Depends(admin)])
+    async def web_quote(account_id: str, request: Request):
+        from app.catalog import normalize_request
+        payload = normalize_request(await request.json())
+        if any(payload[k] for k in ('image_urls','video_urls','audio_urls')) or payload.get('first_frame'):
+            raise ValueError('单独报价检测仅用于无素材请求；正式任务会上传素材后重新报价')
+        quote, _, _, _ = await service.web(account_id).quote(payload)
+        return {'model': payload['model'], 'resolved_model_id':quote['modelId'], 'feature':quote['modelFeature'], 'credits':quote['cost'], 'validation':'quote_verified'}
 
     @app.get('/api/accounts/{account_id}/browser', dependencies=[Depends(admin)])
     async def browser(account_id: str):

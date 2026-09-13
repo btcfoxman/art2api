@@ -20,7 +20,7 @@ class Settings:
     chrome_executable: str = field(default_factory=lambda: os.getenv("ART_CHROME_EXECUTABLE", ""))
     browser_timeout: int = 900
     oauth_client_id: str = field(default_factory=lambda: os.getenv("ART_OAUTH_CLIENT_ID", ""))
-    version: str = "0.1.0"
+    version: str = "0.2.0"
 
     def validate(self):
         if len(self.api_key) < 24 or len(self.admin_token) < 24:
@@ -33,4 +33,3 @@ class Settings:
             raise ValueError("ART_PUBLIC_BASE_URL must use HTTPS or localhost")
         if min(self.poll_interval, self.request_timeout, self.task_timeout) <= 0 or self.queue_limit < 1:
             raise ValueError("timeouts, interval and queue limit must be positive")
-

@@ -59,6 +59,10 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT, account_id TEXT, task_id TEXT,
                 kind TEXT NOT NULL, detail TEXT NOT NULL, created_at REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS web_verifications (
+                digest TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id),
+                secret TEXT NOT NULL, expires_at REAL NOT NULL, task_id TEXT UNIQUE
+            );
         """)
         columns = {row[1] for row in self.conn.execute('PRAGMA table_info(tasks)')}
         if 'query_deadline' not in columns:
@@ -90,7 +94,9 @@ class Database:
             secret = self.unseal(result.pop("secret"))
             result.pop("proxy_fingerprint")
             result["proxy_url_masked"] = mask_proxy(secret["proxy_url"])
-            result["authorized"] = bool(secret.get("access_token"))
+            result['backend'] = secret.get('backend', 'mcp')
+            result["authorized"] = bool(secret.get('web_cookie') if result['backend'] == 'web' else secret.get("access_token"))
+            result['verification_ready'] = self.has_verification(account_id) if result['backend'] == 'web' else True
             result["token_expires_at"] = secret.get("expires_at")
             result["enabled"] = bool(result["enabled"])
             for key in ("tools", "catalog", "profiles"):
@@ -116,6 +122,14 @@ class Database:
             if account_id:
                 old = self.account(account_id, True)
                 secret = old["credentials"]
+                if 'backend' in values and values['backend'] != secret.get('backend', 'mcp'):
+                    if self.active_count(account_id):
+                        raise ValueError('存在未结束任务，不能切换账号接入方式')
+                    if values['backend'] not in {'web', 'mcp'}:
+                        raise ValueError('invalid backend')
+                    secret['backend'] = values['backend']
+                    con.execute('DELETE FROM web_verifications WHERE account_id=? AND task_id IS NULL', (account_id,))
+                    con.execute("UPDATE accounts SET secret=?,enabled=0,status='unchecked',tools='[]',profiles='{}',catalog='{}' WHERE id=?", (self.seal(secret), account_id))
                 if values.get("proxy_url"):
                     proxy = normalize_proxy(values["proxy_url"])
                     if proxy != secret["proxy_url"]:
@@ -124,6 +138,7 @@ class Database:
                         secret["proxy_url"] = proxy
                         fingerprint = hashlib.sha256(proxy.encode()).hexdigest()
                         con.execute("UPDATE accounts SET secret=?, proxy_fingerprint=?, proxy_version=proxy_version+1, enabled=0, status='unchecked', egress_ip='', checked_at=NULL WHERE id=?", (self.seal(secret), fingerprint, account_id))
+                        con.execute('DELETE FROM web_verifications WHERE account_id=? AND task_id IS NULL', (account_id,))
                 if values.get("enabled"):
                     fresh = self.account(account_id, True)
                     if fresh["status"] != "ready" or not fresh["authorized"] or not fresh["profiles"] or fresh["duplicate_egress"]:
@@ -135,7 +150,7 @@ class Database:
             else:
                 proxy = normalize_proxy(values.get("proxy_url", ""))
                 account_id = uuid.uuid4().hex
-                con.execute("INSERT INTO accounts (id,name,secret,proxy_fingerprint,max_concurrency,created_at,updated_at) VALUES (?,?,?,?,?,?,?)", (account_id, values["name"], self.seal({"proxy_url": proxy}), hashlib.sha256(proxy.encode()).hexdigest(), values.get("max_concurrency", 1), time.time(), time.time()))
+                con.execute("INSERT INTO accounts (id,name,secret,proxy_fingerprint,max_concurrency,created_at,updated_at) VALUES (?,?,?,?,?,?,?)", (account_id, values["name"], self.seal({"proxy_url": proxy, 'backend': values.get('backend', 'mcp')}), hashlib.sha256(proxy.encode()).hexdigest(), values.get("max_concurrency", 1), time.time(), time.time()))
         return self.account(account_id)
 
     def update_credentials(self, account_id, fields):
@@ -163,6 +178,7 @@ class Database:
             if con.execute("SELECT 1 FROM tasks WHERE account_id=? LIMIT 1", (account_id,)).fetchone():
                 raise ValueError("账号有关联历史任务，请保留停用状态以便审计")
             con.execute("DELETE FROM oauth_states WHERE account_id=?", (account_id,))
+            con.execute('DELETE FROM web_verifications WHERE account_id=?', (account_id,))
             con.execute("DELETE FROM accounts WHERE id=?", (account_id,))
 
     def put_oauth_state(self, state, account_id, value):
@@ -212,14 +228,42 @@ class Database:
             eligible = []
             for account_id, profile in candidates:
                 account = self.account(account_id)
+                if profile.get('backend') == 'web' and not self.has_verification(account_id):
+                    continue
                 if account['enabled'] and account['status'] == 'ready' and not account['duplicate_egress'] and self.active_count(account_id) < account['max_concurrency']:
                     eligible.append((account, profile))
             if not eligible:
-                raise GatewayError("ARTAPI has no available authorized proxy account for this model and its parameters", "entitlement_unavailable", 503)
+                raise GatewayError("ARTAPI has no available authorized proxy account, capacity, or current web verification for this model", "entitlement_unavailable", 503)
             account, profile = min(eligible, key=lambda item: (item[0]['active_tasks'], item[0]['updated_at']))
             task_id = 'art_' + uuid.uuid4().hex
             con.execute("INSERT INTO tasks (id,account_id,proxy_version,status,request,profile,idempotency_key,request_hash,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)", (task_id, account['id'], account['proxy_version'], 'queued', dumps(request), dumps(profile), idempotency_key or None, digest, time.time(), time.time()))
+            if profile.get('backend') == 'web':
+                verification = con.execute('SELECT digest FROM web_verifications WHERE account_id=? AND task_id IS NULL AND expires_at>? ORDER BY expires_at LIMIT 1', (account['id'], time.time()+30)).fetchone()
+                con.execute('UPDATE web_verifications SET task_id=? WHERE digest=?', (task_id, verification['digest']))
             return self.task(task_id), True
+
+    def has_verification(self, account_id):
+        return bool(self.conn.execute('SELECT 1 FROM web_verifications WHERE account_id=? AND task_id IS NULL AND expires_at>? LIMIT 1', (account_id, time.time()+30)).fetchone())
+
+    def save_verification(self, account_id, token):
+        if not isinstance(token, str) or not 20 <= len(token) <= 16000 or any(c.isspace() for c in token):
+            raise ValueError('网页验证令牌格式无效')
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        with self.transaction() as con:
+            if self.account(account_id)['backend'] != 'web':
+                raise ValueError('仅网页账号支持网页验证')
+            if con.execute('SELECT 1 FROM web_verifications WHERE digest=?', (digest,)).fetchone():
+                raise ValueError('验证令牌已登记或已使用，不能重放')
+            con.execute('INSERT INTO web_verifications VALUES (?,?,?,?,NULL)', (digest, account_id, self.seal({'token': token}), time.time()+240))
+
+    def take_verification(self, task_id):
+        with self.transaction() as con:
+            row = con.execute('SELECT * FROM web_verifications WHERE task_id=? AND expires_at>?', (task_id, time.time())).fetchone()
+            if not row or not row['secret']:
+                raise GatewayError('网页验证已过期，需要重新完成正常网页验证', 'generation_rejected', 422)
+            token = self.unseal(row['secret'])['token']
+            con.execute("UPDATE web_verifications SET secret='' WHERE task_id=?", (task_id,))
+            return token
 
     def update_task(self, task_id, **fields):
         if not fields.keys() <= {'status','upstream_id','result','error','error_code','query_deadline'}:

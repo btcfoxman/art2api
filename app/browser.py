@@ -1,20 +1,68 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
+import os
+import shutil
+import subprocess
 import time
-from urllib.parse import urlsplit
 
-from playwright.async_api import async_playwright
+import httpx
+from websockets.asyncio.client import connect
 
-from app.network import browser_proxy
 from app.errors import GatewayError
+from app.network import browser_proxy
+
+
+class CDP:
+    """JSON-RPC over Chromium's native DevTools WebSocket."""
+    def __init__(self, websocket):
+        self.ws, self.serial, self.pending = websocket, 0, {}
+        self.reader = asyncio.create_task(self.read())
+
+    async def read(self):
+        try:
+            async for raw in self.ws:
+                message = json.loads(raw)
+                future = self.pending.get(message.get('id'))
+                if future and not future.done():
+                    if 'error' in message:
+                        future.set_exception(GatewayError('浏览器 CDP 指令失败', 'browser_error'))
+                    else:
+                        future.set_result(message.get('result', {}))
+        finally:
+            for future in list(self.pending.values()):
+                if not future.done():
+                    future.set_exception(GatewayError('浏览器连接已断开', 'browser_error'))
+
+    async def call(self, method, params=None):
+        self.serial += 1
+        identifier = self.serial
+        future = asyncio.get_running_loop().create_future()
+        self.pending[identifier] = future
+        try:
+            await self.ws.send(json.dumps({'id': identifier, 'method': method, 'params': params or {}}))
+            return await asyncio.wait_for(future, 45)
+        finally:
+            self.pending.pop(identifier, None)
+
+    async def evaluate(self, expression):
+        result = await self.call('Runtime.evaluate', {'expression': expression, 'returnByValue': True, 'awaitPromise': True})
+        if result.get('exceptionDetails'):
+            raise GatewayError('浏览器页面操作失败', 'browser_error')
+        return result.get('result', {}).get('value')
+
+    async def close(self):
+        await self.ws.close()
+        self.reader.cancel()
+        await asyncio.gather(self.reader, return_exceptions=True)
 
 
 class BrowserManager:
-    """Account-isolated authorization browsers. All browser traffic uses the bound proxy."""
+    """An isolated Chromium process, profile and mandatory proxy for each account."""
     def __init__(self, db, settings):
         self.db, self.settings = db, settings
-        self.playwright = None
         self.sessions = {}
         self.lock = asyncio.Lock()
 
@@ -22,68 +70,113 @@ class BrowserManager:
         async with self.lock:
             await self.close(account_id)
             account = self.db.account(account_id, True)
-            if not self.playwright:
-                self.playwright = await async_playwright().start()
+            if account['active_tasks'] and account['backend'] != 'web':
+                raise ValueError('存在未结束任务，不能重新登录')
+            proxy = browser_proxy(account['credentials']['proxy_url'])
+            if proxy.get('username'):
+                raise ValueError('CDP 浏览器需要无认证本地代理，例如 Xray；协议调用仍支持认证代理')
+            executable = self.settings.chrome_executable or shutil.which('chromium') or shutil.which('google-chrome')
+            if not executable:
+                raise GatewayError('未配置 Chromium 可执行文件', 'browser_error')
             profile = self.settings.data_dir / 'browser-profiles' / account_id
             profile.mkdir(parents=True, exist_ok=True)
-            context = await self.playwright.chromium.launch_persistent_context(
-                str(profile), executable_path=self.settings.chrome_executable or None,
-                headless=True, proxy=browser_proxy(account['credentials']['proxy_url']),
-                viewport={'width': 1100, 'height': 760},
-                args=['--disable-dev-shm-usage', '--disable-quic', '--proxy-bypass-list=<-loopback>',
-                      '--force-webrtc-ip-handling-policy=disable_non_proxied_udp'],
-            )
-            page = context.pages[0] if context.pages else await context.new_page()
-            self.sessions[account_id] = {'context': context, 'page': page, 'expires': time.time() + self.settings.browser_timeout}
+            port_file = profile / 'DevToolsActivePort'
+            port_file.unlink(missing_ok=True)
+            args = [executable, '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
+                    '--user-data-dir='+str(profile.resolve()), '--proxy-server='+proxy['server'],
+                    '--proxy-bypass-list=<-loopback>', '--disable-quic', '--disable-dev-shm-usage',
+                    '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--window-size=1100,760', 'about:blank']
+            if os.name != 'nt' and hasattr(os, 'geteuid') and os.geteuid() == 0:
+                args.insert(1, '--no-sandbox')
+            options = {}
+            if os.name == 'nt':
+                startup = subprocess.STARTUPINFO()
+                startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startup.wShowWindow = subprocess.SW_HIDE
+                options['startupinfo'] = startup
+            process = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, **options)
+            self.sessions[account_id] = {'process': process, 'expires': time.time()+self.settings.browser_timeout, 'cdp': None}
             try:
-                await page.goto(authorization_url, wait_until='domcontentloaded', timeout=60000)
-                if 'unknown client:' in (await page.content()).lower():
-                    raise GatewayError('Artlist 未接受此 OAuth 客户端。请申请自建应用的 Client ID，并配置 ART_OAUTH_CLIENT_ID；账号密码不能替代客户端注册。', 'oauth_client_required', 422)
+                for _ in range(100):
+                    if port_file.exists():
+                        break
+                    if process.returncode is not None:
+                        raise GatewayError('账号浏览器启动失败', 'browser_error')
+                    await asyncio.sleep(.2)
+                port = int(port_file.read_text().splitlines()[0])
+                # Only localhost CDP traffic bypasses the account proxy.
+                async with httpx.AsyncClient(trust_env=False) as http:
+                    pages = (await http.get(f'http://127.0.0.1:{port}/json/list')).json()
+                page = next(p for p in pages if p.get('type') == 'page')
+                cdp = CDP(await connect(page['webSocketDebuggerUrl'], proxy=None, max_size=20_000_000))
+                self.sessions[account_id].update(cdp=cdp, port=port, target=page['id'])
+                await cdp.call('Page.enable')
+                await cdp.call('Emulation.setDeviceMetricsOverride', {'width':1100,'height':760,'deviceScaleFactor':1,'mobile':False})
+                await cdp.call('Page.navigate', {'url': authorization_url})
             except Exception:
                 await self.close(account_id)
                 raise
 
-    def page(self, account_id):
+    async def page(self, account_id):
         session = self.sessions.get(account_id)
-        if not session or time.time() > session['expires']:
-            raise ValueError('授权浏览器未启动或已超时，请重新连接')
-        pages = [p for p in session['context'].pages if not p.is_closed()]
-        if pages:
-            session['page'] = pages[-1]
-        return session['page']
+        if not session or time.time()>session['expires'] or not session.get('cdp'):
+            raise ValueError('浏览器未启动或已超时，请重新连接')
+        session['expires'] = time.time()+self.settings.browser_timeout
+        return session['cdp']
 
     async def snapshot(self, account_id):
-        page = self.page(account_id)
-        return await page.screenshot(type='jpeg', quality=75)
+        cdp = await self.page(account_id)
+        result = await cdp.call('Page.captureScreenshot', {'format':'jpeg','quality':75,'captureBeyondViewport':False})
+        return base64.b64decode(result['data'])
+
+    async def session_credentials(self, account_id):
+        cdp = await self.page(account_id)
+        result = await cdp.call('Network.getCookies', {'urls':['https://toolkit.artlist.io/']})
+        agent = await cdp.evaluate('navigator.userAgent')
+        return {'cookie': '; '.join(c['name']+'='+c['value'] for c in result['cookies']), 'user_agent': agent}
 
     async def action(self, account_id, action):
-        page = self.page(account_id)
+        cdp = await self.page(account_id)
         kind = action['kind']
         if kind == 'click':
-            await page.mouse.click(float(action['x']), float(action['y']))
+            for event in ('mousePressed','mouseReleased'):
+                await cdp.call('Input.dispatchMouseEvent', {'type':event,'x':action['x'],'y':action['y'],'button':'left','clickCount':1})
         elif kind == 'type':
-            await page.keyboard.insert_text(str(action['text']))
-        elif kind == 'key':
-            if action['key'] not in {'Tab', 'Enter', 'Backspace', 'Escape', 'ArrowDown', 'ArrowUp', 'ControlOrMeta+A'}:
-                raise ValueError('unsupported key')
-            await page.keyboard.press(action['key'])
+            await cdp.call('Input.insertText', {'text':str(action['text'])})
         elif kind == 'scroll':
-            await page.mouse.wheel(0, max(-760, min(760, float(action.get('y', 0)))))
+            await cdp.call('Input.dispatchMouseEvent', {'type':'mouseWheel','x':550,'y':380,'deltaX':0,'deltaY':action.get('y',0)})
+        elif kind == 'key':
+            keys={'Tab':9,'Enter':13,'Backspace':8,'Escape':27,'ArrowDown':40,'ArrowUp':38,'ControlOrMeta+A':65}
+            key=action['key']
+            if key not in keys:
+                raise ValueError('unsupported key')
+            for event in ('keyDown','keyUp'):
+                params={'type':event,'key':'a' if key=='ControlOrMeta+A' else key,'windowsVirtualKeyCode':keys[key],'modifiers':2 if key=='ControlOrMeta+A' else 0}
+                if key=='Enter' and event=='keyDown':params['text']='\r'
+                await cdp.call('Input.dispatchKeyEvent',params)
         else:
             raise ValueError('unsupported browser action')
 
     async def close(self, account_id):
         session = self.sessions.pop(account_id, None)
-        if session:
-            await session['context'].close()
+        if not session:
+            return
+        if session.get('cdp'):
+            await session['cdp'].close()
+        process = session['process']
+        if process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), 10)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
 
     async def cleanup(self):
         for account_id, session in list(self.sessions.items()):
-            if session['expires'] < time.time():
+            if session['expires']<time.time():
                 await self.close(account_id)
 
     async def stop(self):
         for account_id in list(self.sessions):
             await self.close(account_id)
-        if self.playwright:
-            await self.playwright.stop()
