@@ -16,6 +16,21 @@ from websockets.asyncio.client import connect
 from app.errors import GatewayError
 from app.cookies import browser_cookies
 from app.network import browser_proxy
+from app.web import web_task_context
+
+
+GENERATOR_URL = 'https://toolkit.artlist.io/image-video-generator?mode=video'
+SDK_READY = "location.origin === 'https://toolkit.artlist.io' && location.pathname === '/image-video-generator' && !!window.turnstile"
+CLEAR_VERIFICATION = """(()=>{
+  delete window.__art2apiVerificationRun;
+  try { if(window.__art2apiVerificationWidget!==undefined) window.turnstile?.remove(window.__art2apiVerificationWidget); }
+  finally {
+    document.getElementById('art2api-normal-verification')?.remove();
+    delete window.__art2apiVerification;
+    delete window.__art2apiVerificationWidget;
+  }
+  return true;
+})()"""
 
 
 class CDP:
@@ -70,6 +85,51 @@ class BrowserManager:
         self.lock = asyncio.Lock()
         self.verification_locks = {}
 
+    def account_lock(self, account_id):
+        # Verification, operator actions and lifecycle changes share ownership.
+        return self.verification_locks.setdefault(account_id, asyncio.Lock())
+
+    @staticmethod
+    def live(session):
+        return bool(session and session['process'].returncode is None
+                    and session.get('cdp') and not session['cdp'].reader.done())
+
+    async def verification_page(self, account_id, account):
+        """Called with the account lock held; rebuild only an unusable session."""
+        session = self.sessions.get(account_id)
+        reused = bool(self.live(session) and session.get('purpose') == 'verification'
+                      and session.get('proxy_version') == account['proxy_version']
+                      and session.get('web_user_id') == account['credentials'].get('web_user_id')
+                      and session.get('headless') == self.settings.browser_headless)
+        page_ready = False
+        if reused:
+            try:
+                page_ready = await asyncio.wait_for(session['cdp'].evaluate(SDK_READY), 5)
+            except Exception:
+                reused = False
+        if not reused:
+            await self._open(account_id, 'about:blank', purpose='verification')
+            session = self.sessions[account_id]
+        cdp = session['cdp']
+        session['expires'] = time.time()+self.settings.browser_timeout
+        await cdp.call('Network.enable')
+        # Apply before the first toolkit navigation, and retain it on warm pages.
+        await cdp.call('Network.setBlockedURLs', {'urls': ['*createUserGeneration*']})
+        cookie = account['credentials'].get('web_cookie', '')
+        if session.get('synced_cookie') != cookie:
+            await cdp.call('Network.clearBrowserCookies')
+            await cdp.call('Network.setCookies', {'cookies': browser_cookies(cookie)})
+            session['synced_cookie'] = cookie
+        if not page_ready:
+            await cdp.call('Page.navigate', {'url': GENERATOR_URL})
+            for _ in range(60):
+                if await cdp.evaluate(SDK_READY):
+                    break
+                await asyncio.sleep(1)
+            else:
+                raise GatewayError('后台网页验证脚本未就绪，请检查账号代理或登录', 'verification_unavailable', 503)
+        return cdp, {'browser_reused': reused, 'page_reused': bool(page_ready)}
+
     @staticmethod
     def profile_guard(profile):
         """Serialize profile ownership and clear locks left by a stopped container."""
@@ -95,29 +155,25 @@ class BrowserManager:
 
     async def generation_verification(self, account_id):
         """Run the normal SDK; never create generations or solve challenges."""
-        lock = self.verification_locks.setdefault(account_id, asyncio.Lock())
-        async with lock:
-            await self.open(account_id, 'about:blank')
-            cdp = await self.page(account_id)
+        started = time.monotonic()
+        async with self.account_lock(account_id):
+            timing = {'queue_seconds': round(time.monotonic()-started, 3)}
             account = self.db.account(account_id, True)
             secret = account['credentials']
-            await cdp.call('Network.enable')
-            # Static blocking avoids the paused-request retry/resume hazard.
-            await cdp.call('Network.setBlockedURLs', {'urls': ['*createUserGeneration*']})
-            await cdp.call('Network.clearBrowserCookies')
-            await cdp.call('Network.setCookies', {'cookies': browser_cookies(secret.get('web_cookie', ''))})
-            await cdp.call('Page.navigate', {'url': 'https://toolkit.artlist.io/image-video-generator?mode=video'})
-            for _ in range(60):
-                if await cdp.evaluate("location.origin === 'https://toolkit.artlist.io' && !!window.turnstile"):
-                    break
-                await asyncio.sleep(1)
-            else:
-                raise GatewayError('后台网页验证脚本未就绪，请检查账号代理或登录', 'verification_unavailable', 503)
-            identity = await cdp.evaluate("fetch('/api/auth/session',{credentials:'include',cache:'no-store'}).then(r=>r.json()).then(s=>s.user?.id||null)")
-            if not identity or identity != secret.get('web_user_id'):
-                raise GatewayError('后台浏览器未保持原账号登录；已保留原会话，请重新导入登录', 'reauthorization_required', 401)
-            await cdp.evaluate(Path(__file__).with_name('verification.js').read_text(encoding='utf-8'))
+            cdp = None
             try:
+                phase = time.monotonic()
+                cdp, reuse = await self.verification_page(account_id, account)
+                timing.update(reuse, browser_setup_seconds=round(time.monotonic()-phase, 3))
+                phase = time.monotonic()
+                identity = await cdp.evaluate("fetch('/api/auth/session',{credentials:'include',cache:'no-store'}).then(r=>r.json()).then(s=>s.user?.id||null)")
+                timing['session_check_seconds'] = round(time.monotonic()-phase, 3)
+                if not identity or identity != secret.get('web_user_id'):
+                    raise GatewayError('后台浏览器未保持原账号登录；已保留原会话，请重新导入登录', 'reauthorization_required', 401)
+                # Each warm verification gets a new widget and callback scope.
+                phase = time.monotonic()
+                await cdp.evaluate(CLEAR_VERIFICATION)
+                await cdp.evaluate(Path(__file__).with_name('verification.js').read_text(encoding='utf-8'))
                 for _ in range(60):
                     value = await cdp.evaluate('window.__art2apiVerification')
                     if value and value.get('status') in {'ready', 'error', 'unsupported', 'timeout'}:
@@ -125,25 +181,47 @@ class BrowserManager:
                     await asyncio.sleep(1)
                 else:
                     raise GatewayError('Artlist 需要在账号控制台完成正常网页验证', 'verification_required', 503)
+                timing['sdk_seconds'] = round(time.monotonic()-phase, 3)
                 if value['status'] == 'ready':
                     result = {'token': value['token']}
                 else:
                     # Pass the real SDK result as the first-party tRPC link does.
                     # Artlist decides whether this request is allowed.
                     result = {'client_error': value['code']}
-                if self.db.account(account_id)['proxy_version'] != account['proxy_version']:
-                    raise GatewayError('验证期间账号代理已变更', 'proxy_binding_changed')
-                session = await self.session_credentials(account_id)
-                self.db.update_credentials(account_id, {'web_cookie': session['cookie'], 'web_user_agent': session['user_agent']})
-                self.db.event('web_verification', 'Normal SDK: '+('token_ready' if 'token' in result else result['client_error']), account_id)
-                return result
+                credentials = await self._session_credentials(cdp)
+                current = self.db.account(account_id, True)
+                if (current['proxy_version'] != account['proxy_version']
+                        or current['credentials'].get('web_user_id') != secret.get('web_user_id')):
+                    raise GatewayError('验证期间账号或代理已变更', 'proxy_binding_changed')
+                self.db.update_web_session_if_current(account_id, secret, credentials)
+                self.sessions[account_id]['synced_cookie'] = credentials['cookie']
+                timing['total_seconds'] = round(time.monotonic()-started, 3)
+                self.db.event('web_verification', json.dumps({
+                    'result': 'token_ready' if 'token' in result else result['client_error'],
+                    'browser_pid': self.sessions[account_id]['process'].pid, **timing,
+                }), account_id, web_task_context.get())
+                return {**result, 'timing': timing}
+            except BaseException:
+                # An interrupted/invalid page is not reused by the next task.
+                await self._close(account_id)
+                raise
             finally:
-                # Tokens exist only in memory and are consumed by one task.
-                await cdp.evaluate("(()=>{if(window.__art2apiVerificationWidget!==undefined)window.turnstile.remove(window.__art2apiVerificationWidget);document.getElementById('art2api-normal-verification')?.remove();delete window.__art2apiVerification;delete window.__art2apiVerificationWidget;return true})()")
+                if account_id in self.sessions:
+                    try:
+                        if cdp:
+                            await cdp.evaluate(CLEAR_VERIFICATION)
+                    except Exception:
+                        await self._close(account_id)
+                    else:
+                        self.sessions[account_id]['expires'] = time.time()+self.settings.browser_timeout
 
     async def open(self, account_id, authorization_url):
+        async with self.account_lock(account_id):
+            await self._open(account_id, authorization_url)
+
+    async def _open(self, account_id, authorization_url, *, purpose='operator'):
         async with self.lock:
-            await self.close(account_id)
+            await self._close(account_id)
             account = self.db.account(account_id, True)
             if account['active_tasks'] and account['backend'] != 'web':
                 raise ValueError('存在未结束任务，不能重新登录')
@@ -195,7 +273,13 @@ class BrowserManager:
                 if guard:
                     guard.close()
                 raise
-            self.sessions[account_id] = {'process': process, 'expires': time.time()+self.settings.browser_timeout, 'cdp': None, 'profile_guard': guard, 'display': display}
+            self.sessions[account_id] = {
+                'process': process, 'expires': time.time()+self.settings.browser_timeout,
+                'cdp': None, 'profile_guard': guard, 'display': display, 'purpose': purpose,
+                'proxy_version': account['proxy_version'],
+                'web_user_id': account['credentials'].get('web_user_id'),
+                'headless': self.settings.browser_headless,
+            }
             try:
                 # Only localhost CDP traffic bypasses the account proxy.
                 async with httpx.AsyncClient(trust_env=False, timeout=1) as http:
@@ -219,29 +303,37 @@ class BrowserManager:
                 await cdp.call('Page.enable')
                 await cdp.call('Emulation.setDeviceMetricsOverride', {'width':1100,'height':760,'deviceScaleFactor':1,'mobile':False})
                 await cdp.call('Page.navigate', {'url': authorization_url})
-            except Exception:
-                await self.close(account_id)
+            except BaseException:
+                await self._close(account_id)
                 raise
 
     async def page(self, account_id):
         session = self.sessions.get(account_id)
-        if not session or time.time()>session['expires'] or not session.get('cdp'):
+        if not self.live(session):
             raise ValueError('浏览器未启动或已超时，请重新连接')
         session['expires'] = time.time()+self.settings.browser_timeout
         return session['cdp']
 
     async def snapshot(self, account_id):
-        cdp = await self.page(account_id)
-        result = await cdp.call('Page.captureScreenshot', {'format':'jpeg','quality':75,'captureBeyondViewport':False})
-        return base64.b64decode(result['data'])
+        async with self.account_lock(account_id):
+            cdp = await self.page(account_id)
+            result = await cdp.call('Page.captureScreenshot', {'format':'jpeg','quality':75,'captureBeyondViewport':False})
+            return base64.b64decode(result['data'])
 
     async def session_credentials(self, account_id):
-        cdp = await self.page(account_id)
+        async with self.account_lock(account_id):
+            return await self._session_credentials(await self.page(account_id))
+
+    async def _session_credentials(self, cdp):
         result = await cdp.call('Network.getCookies', {'urls':['https://toolkit.artlist.io/']})
         agent = await cdp.evaluate('navigator.userAgent')
         return {'cookie': '; '.join(c['name']+'='+c['value'] for c in result['cookies']), 'user_agent': agent}
 
     async def action(self, account_id, action):
+        async with self.account_lock(account_id):
+            await self._action(account_id, action)
+
+    async def _action(self, account_id, action):
         cdp = await self.page(account_id)
         kind = action['kind']
         if kind == 'click':
@@ -264,6 +356,10 @@ class BrowserManager:
             raise ValueError('unsupported browser action')
 
     async def close(self, account_id):
+        async with self.account_lock(account_id):
+            await self._close(account_id)
+
+    async def _close(self, account_id):
         session = self.sessions.pop(account_id, None)
         if not session:
             return
@@ -295,8 +391,22 @@ class BrowserManager:
 
     async def cleanup(self):
         for account_id, session in list(self.sessions.items()):
-            if session['expires']<time.time():
-                await self.close(account_id)
+            lock = self.account_lock(account_id)
+            if lock.locked():
+                continue
+            if session.get('purpose') == 'verification':
+                try:
+                    account = self.db.account(account_id)
+                    expired = not account['enabled'] and not account['active_tasks']
+                except KeyError:
+                    expired = True
+                expired = expired or not self.live(session)
+            else:
+                expired = session['expires'] < time.time()
+            if expired:
+                async with lock:
+                    if self.sessions.get(account_id) is session:
+                        await self._close(account_id)
 
     async def stop(self):
         for account_id in list(self.sessions):

@@ -510,6 +510,9 @@ async def test_compatible_api_submits_signed_web_task_and_returns_video(tmp_path
             result=(await api.get('/api/v3/contents/generations/tasks/'+task_id)).json()
             assert result['status']=='succeeded'
             assert result['content']['video_url']=='https://media.example/result.mp4'
+            assert result['preparation_timing']['stage']=='ready'
+            for phase in ['media_seconds','verification_seconds','quote_seconds','eligibility_and_session_seconds','total_seconds']:
+                assert result['preparation_timing'][phase]>=0
             submitted=next(c.args[1] for c in web.rpc.await_args_list if c.args[0]=='userGenerationRouter.createUserGeneration')
             assert submitted['modelGroupId']==3009 and submitted['costQuoteDigitalSignature']=='current-signature'
             if with_verification == 'provided':
@@ -555,4 +558,20 @@ async def test_background_verification_failure_never_enters_submit(setup):
     await asyncio.gather(*list(service.jobs.values()))
     assert db.task(task['id'])['status'] == 'failed'
     assert db.task(task['id'])['error_code'] == 'verification_required'
+    web.submit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_preparation_failure_preserves_stage_timing_and_never_submits(setup):
+    db, settings, aid = setup
+    service = Service(db, settings)
+    service.browsers.generation_verification = AsyncMock(side_effect=GatewayError('SDK unavailable','verification_unavailable'))
+    web = service.web(aid)
+    web.submit = AsyncMock()
+    task = await service.create({'model':MODEL,'prompt':'test'}, 'timed-failure')
+    await asyncio.gather(*list(service.jobs.values()))
+    stored = db.task(task['id'])
+    assert stored['status']=='failed'
+    timing = Service.public_task(stored)['preparation_timing']
+    assert timing['stage']=='verification' and timing['total_seconds']>=timing['media_seconds']
     web.submit.assert_not_awaited()

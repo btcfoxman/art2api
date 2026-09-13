@@ -383,6 +383,17 @@ class WebClient:
                     **({'processing': processing} if processing else {})}
 
     async def prepare(self, task):
+        started = time.monotonic()
+        timing = {}
+        try:
+            return await self._prepare(task, timing)
+        finally:
+            timing['total_seconds'] = round(time.monotonic()-started, 3)
+            self.db.update_task(task['id'], result={**self.db.task(task['id'])['result'], 'preparation_timing': timing})
+
+    async def _prepare(self, task, timing):
+        timing['stage'] = 'media'
+        phase = time.monotonic()
         request=task['request']
         validate_request(request,task['profile'])
         _, tags = reference_prompt(request)
@@ -419,12 +430,22 @@ class WebClient:
                         assets['audio_urls'][index]['file_url'], 'audio', silence_seconds=seconds)
                     save_processing()
             self.validate_media(assets, context)
+        timing['media_seconds'] = round(time.monotonic()-phase, 3)
         # A cold browser verification may take tens of seconds. Obtain the
         # short-lived cost signature only after normal verification completes.
+        timing['stage'] = 'verification'
+        phase = time.monotonic()
         token=self.db.take_verification(task['id'])
         verification = {'token': token} if token else (await self.browsers.generation_verification(self.account_id) if self.browsers else {})
+        timing['verification_seconds'] = round(time.monotonic()-phase, 3)
+        if verification.get('timing'):
+            timing['browser'] = verification['timing']
+        timing['stage'] = 'quote'
+        phase = time.monotonic()
         quote,inputs,settings,artifacts=await self.quote(request,assets)
+        timing['quote_seconds'] = round(time.monotonic()-phase, 3)
         quoted_at = time.monotonic()
+        timing['stage'] = 'eligibility_and_session'
         eligibility=await self.rpc('userGenerationRouter.checkGenerationEligibility',{'price':quote['cost'],'modelId':quote['modelId'],'settings':settings},post=True)
         self.db.update_credentials(self.account_id, {'web_last_preflight': {'eligibility': eligibility, 'model_id': quote['modelId']}})
         if eligibility.get('isFairUseExceeded') or eligibility.get('isConcurrencyExceeded'):
@@ -439,6 +460,8 @@ class WebClient:
         payload = generation_payload(session['id'],quote,inputs,settings,artifacts,verification.get('token', ''))
         if verification.get('client_error'):
             payload['turnstileClientError'] = verification['client_error']
+        timing['eligibility_and_session_seconds'] = round(time.monotonic()-quoted_at, 3)
+        timing['stage'] = 'ready'
         return payload
 
     async def submit(self, payload):

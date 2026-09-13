@@ -4,7 +4,11 @@
   const container = document.createElement('div');
   container.id = 'art2api-normal-verification';
   document.body.append(container);
-  const update = value => { window.__art2apiVerification = value; };
+  const run = Symbol('art2api-verification');
+  window.__art2apiVerificationRun = run;
+  const update = value => {
+    if (window.__art2apiVerificationRun === run) window.__art2apiVerification = value;
+  };
   update({status: 'waiting'});
   window.__art2apiVerificationWidget = window.turnstile.render(container, {
     sitekey: '0x4AAAAAAD-4st6Pct76Aua3',

@@ -302,6 +302,7 @@ class Service:
         return {'id': task['id'], 'object': 'video', 'status': status, 'model': task['request']['model'],
                 **({'media_processing': result['media_processing']} if result.get('media_processing') else {}),
                 **({'prompt_processing': result['prompt_processing']} if result.get('prompt_processing') else {}),
+                **({'preparation_timing': result['preparation_timing']} if result.get('preparation_timing') else {}),
                 'progress': 100 if status in {'succeeded', 'failed'} else 10 if status == 'queued' else 30,
                 'created_at': task['created_at'], 'updated_at': task['updated_at'],
                 'content': {'video_url': url} if url else {}, 'data': [{'url': url, 'type': 'video'}] if url else [],

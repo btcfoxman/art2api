@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>ART2API Console</title><link rel="stylesheet" href="/static/styles.css?v=0.3.3"><script src="/static/app.js?v=0.3.7" defer></script></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>ART2API Console</title><link rel="stylesheet" href="/static/styles.css?v=0.3.3"><script src="/static/app.js?v=0.3.9" defer></script></head>
 <body><main class="shell">
   <header class="mast">
     <div class="brand"><span class="brand-mark">AR</span><div><p>ARTLIST PROTOCOL GATEWAY</p><h1>ART2API <span>Console</span></h1></div></div>
@@ -62,7 +62,7 @@
       <label>上游请求超时（秒）<input name="request_timeout_seconds" type="number" min="10" max="600" required><small>适用于后续协议请求；素材上传保留至少 120 秒。</small></label>
     </fieldset>
     <fieldset class="settings-card"><legend>授权浏览器</legend><p class="card-note">每个账号使用独立 Profile 和固定代理。</p>
-      <label>浏览器闲置超时（秒）<input name="browser_timeout_seconds" type="number" min="60" max="7200" required><small>下次浏览器访问时更新闲置期限。</small></label>
+      <label>登录窗口闲置超时（秒）<input name="browser_timeout_seconds" type="number" min="60" max="7200" required><small>后台验证浏览器随启用账号保留，供连续任务复用。</small></label>
       <label class="check"><input name="browser_headless" type="checkbox"><span>无头浏览器模式</span></label><p class="card-note">对下次启动的浏览器生效。默认关闭，正常验证 SDK 可能拒绝无头环境。</p>
       <label>Chrome 可执行文件<input id="chromeExecutable" readonly class="mono"><small>由部署环境 ART_CHROME_EXECUTABLE 配置。</small></label>
       <div class="settings-note"><span data-icon="shield"></span><p>代理在账号编辑窗口配置。所有生成、素材上传和状态查询都使用该账号的固定出口。</p></div>

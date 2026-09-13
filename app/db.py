@@ -163,6 +163,16 @@ class Database:
             secret.update(fields)
             con.execute("UPDATE accounts SET secret=?,updated_at=? WHERE id=?", (self.seal(secret), time.time(), account_id))
 
+    def update_web_session_if_current(self, account_id, original, browser):
+        """A warm browser must not overwrite a newer HTTP/imported login."""
+        with self.transaction() as con:
+            current = self.account(account_id, True)['credentials']
+            if any(current.get(key) != original.get(key) for key in ('web_cookie', 'web_user_id', 'proxy_url')):
+                return False
+            current.update(web_cookie=browser['cookie'], web_user_agent=browser['user_agent'])
+            con.execute("UPDATE accounts SET secret=?,updated_at=? WHERE id=?", (self.seal(current), time.time(), account_id))
+            return True
+
     def update_account(self, account_id, **fields):
         allowed = {"status", "enabled", "egress_ip", "checked_at", "last_error", "tools", "catalog", "profiles"}
         if not fields.keys() <= allowed:
