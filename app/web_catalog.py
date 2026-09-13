@@ -94,7 +94,10 @@ def reference_prompt(request):
 
 def reference_header(request, tags):
     # Preserve the proven leading-audio workaround when other media are present.
-    ordered = sorted(tags, key=lambda tag: tag['type'] != '@aud')
+    # The leading index uses natural order: an upstream substring lookup for
+    # @img1 must encounter its standalone occurrence before any @img10 token.
+    order = {'@aud': 0, '@img': 1, '@vid': 2}
+    ordered = sorted(tags, key=lambda tag: (order[tag['type']], tag['orderForType']))
     return ' '.join(tag['tagId'] for tag in ordered) + '\n' if tags else ''
 
 

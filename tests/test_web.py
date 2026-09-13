@@ -132,7 +132,10 @@ def test_overlapping_reference_indices_keep_asset_binding_and_complete_prompt(fi
     assets={field:[{'file_key':str(n),'file_url':url,'metadata':{'durationMs':4000}} for n,url in enumerate(urls,1)]}
     quote,inputs,settings,artifacts=quote_input(request,assets)
     prompt,tags=reference_prompt(request)
-    assert prompt.startswith(f'{prefix}10 {prefix}1 {prefix}9\n')
+    assert prompt.startswith(f'{prefix}1 {prefix}9 {prefix}10\n')
+    # Even a non-boundary-aware upstream search sees the short tag itself,
+    # never the leading portion of the longer tag in the original body.
+    assert prompt[prompt.find(prefix+'1')+len(prefix+'1')] == ' '
     assert prompt.endswith(original.replace('@'+alias,prefix))
     assert [t['orderForType'] for t in tags] == [10,1,9]
     assert [t['tagId'] for t in tags] == [f'{prefix}10',f'{prefix}1',f'{prefix}9']
