@@ -141,12 +141,12 @@ class Service:
 
     async def create(self, payload, idempotency_key=''):
         request = normalize_request(payload)
+        existing = self.db.conn.execute('SELECT 1 FROM tasks WHERE idempotency_key=?', (idempotency_key,)).fetchone() if idempotency_key else None
         if payload.get('verification_token'):
             account_id = payload.get('verification_account_id')
             if not account_id:
                 raise ValueError('verification_token 必须明确绑定 verification_account_id')
             # On an idempotent retry, the original token has already been claimed.
-            existing = self.db.conn.execute('SELECT 1 FROM tasks WHERE idempotency_key=?', (idempotency_key,)).fetchone() if idempotency_key else None
             if not existing:
                 self.db.save_verification(account_id, payload['verification_token'])
         candidates, validation_errors = [], []
@@ -165,7 +165,7 @@ class Service:
                 validation_errors.append(exc)
                 continue
             candidates.append((account['id'], profile))
-        if not candidates and validation_errors:
+        if not candidates and validation_errors and not existing:
             raise validation_errors[0]
         task, created = self.db.create_task(request, candidates, idempotency_key, self.settings.queue_limit, self.settings.task_timeout)
         if created:

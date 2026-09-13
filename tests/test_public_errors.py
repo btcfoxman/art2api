@@ -170,3 +170,20 @@ def test_successful_result_urls_and_task_identity_remain_usable(api):
         result = http.get(path+'/'+task['id'], headers=headers).json()
         assert result['id']==task['id'] and result['status']=='succeeded' and result['error'] is None
         assert result['content']['video_url']==result['data'][0]['url']=='https://media.example/result.mp4'
+
+
+def test_idempotent_replay_precedes_changed_account_capabilities(api):
+    app, http, headers = api
+    aid = ready_account(app.state.db)
+    payload = {'model':MODEL, 'prompt':'test', 'duration':5}
+    task, _ = app.state.db.create_task(normalize_request(payload), [(aid, profiles()[MODEL])], 'existing', 10)
+    app.state.db.update_task(task['id'], status='failed', error=PRIVATE, error_code='generation_failed')
+    changed = profiles()
+    changed[MODEL]['constraints']['durations'] = [10]
+    app.state.db.update_account(aid, profiles=changed)
+    for path in PATHS:
+        replay = assert_public(http.post(path, headers={**headers,'Idempotency-Key':'existing'}, json=payload), 200)
+        assert replay['id'] == task['id']
+        conflict = assert_public(http.post(path, headers={**headers,'Idempotency-Key':'existing'}, json={**payload,'prompt':'changed'}), 409)
+        assert conflict['error']['code'] == 'idempotency_conflict'
+    app.state.service.schedule.assert_not_called()
