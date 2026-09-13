@@ -240,6 +240,12 @@ async def test_generation_failure_preserves_safe_upstream_code_without_signed_ur
     web.submit.assert_not_awaited()
     unsafe=generation_result({'status':'Failed','errorCode':'private-token\nURL https://private.example'})
     assert unsafe['upstream_error_code']=='' and 'private-token' not in unsafe['error_message']
+    review=generation_result({'status':'Failed','errorCode':'PROVIDER_CONTENT_SAFETY_VIOLATION',
+                              'reason':'OutputAudioSensitiveContentDetected.PolicyViolation: copyright restrictions https://private.example/?signature=secret'})
+    assert review['error_code']=='generation_failed' and '音频' in review['error_message'] and '版权限制' in review['error_message']
+    assert 'private.example' not in json.dumps(review) and 'signature' not in json.dumps(review)
+    generic=generation_result({'status':'Failed','errorCode':'PROVIDER_CONTENT_SAFETY_VIOLATION','reason':'other policy violation'})
+    assert '内容审核未通过' in generic['error_message'] and '版权' not in generic['error_message']
 
 
 @pytest.mark.asyncio

@@ -136,6 +136,12 @@ def generation_result(data):
         # Reasons can contain signed media URLs. Expose the structured code and
         # a safe explanation, never the arbitrary upstream reason string.
         message = 'Artlist 无法读取参考素材' if code=='INPUT_URL_UNREACHABLE' else 'Artlist 明确报告生成失败'
+        if code == 'PROVIDER_CONTENT_SAFETY_VIOLATION':
+            message = 'Artlist 内容审核未通过，请检查提示词或参考素材'
+            if 'OutputAudioSensitiveContentDetected' in str(data.get('reason', '')):
+                message = 'Artlist 输出音频审核未通过'
+                if 'copyright' in str(data.get('reason', '')).lower():
+                    message = 'Artlist 拒绝输出音频：可能涉及版权限制，请调整音频相关请求或参考素材'
         if code=='MAP_INTERNAL_REQUEST_TO_PROVIDER_REQUEST_FAILED' and 'Reference tag not found in prompt' in str(data.get('reason','')):
             message = 'Artlist 提示词引用标签与素材不一致'
         if code:
