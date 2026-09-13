@@ -154,6 +154,44 @@ def test_login_preserves_origin_for_browser_forms_and_rejects_foreign_origin(set
         assert http.post('/login',headers={'Origin':'https://untrusted.example'},data={'token':settings.admin_token}).status_code==403
 
 
+def test_lan_http_login_with_public_https_url_keeps_session(settings):
+    settings.public_base_url = 'https://art2api.example.com'
+    with TestClient(create_app(settings), base_url='http://192.168.3.5:8797') as http:
+        response = http.post('/login', headers={'Origin': 'http://192.168.3.5:8797'},
+                             data={'token': settings.admin_token}, follow_redirects=False)
+        assert response.status_code == 303 and response.headers['location'] == '/'
+        cookie = next(cookie for cookie in http.cookies.jar if cookie.name == 'art_session')
+        assert not cookie.secure
+        assert 'HttpOnly' in response.headers['set-cookie'] and 'SameSite=lax' in response.headers['set-cookie']
+        assert http.get('/', follow_redirects=False).status_code == 200
+        assert http.get('/api/accounts').status_code == 200
+        assert http.post('/logout', headers={'X-Requested-With': 'art2api'}).status_code == 200
+        assert http.get('/api/accounts').status_code == 401
+        response = http.post('/login', data={'token': settings.api_key}, follow_redirects=False)
+        assert response.headers['location'] == '/login?error=1' and 'set-cookie' not in response.headers
+
+
+@pytest.mark.parametrize(('base_url', 'headers'), [
+    ('https://art2api.example.com', {}),
+    ('https://192.168.3.5:8797', {}),
+    # cloudflared can forward HTTPS to the origin over HTTP. The canonical
+    # public host stays secure even if proxy scheme headers are absent/wrong.
+    ('http://art2api.example.com', {}),
+    ('http://art2api.example.com', {'X-Forwarded-Proto': 'http'}),
+    ('http://art2api:8797', {'X-Forwarded-Proto': 'https'}),
+    ('http://art2api:8797', {'X-Forwarded-Proto': 'https, http'}),
+])
+def test_https_admin_cookie_stays_secure_through_proxy(settings, base_url, headers):
+    settings.public_base_url = 'https://art2api.example.com'
+    with TestClient(create_app(settings), base_url=base_url) as http:
+        response = http.post('/login', headers=headers, data={'token': settings.admin_token}, follow_redirects=False)
+        assert response.headers['location'] == '/'
+        cookie = next(cookie for cookie in http.cookies.jar if cookie.name == 'art_session')
+        assert cookie.secure
+        expected = 200 if base_url.startswith('https://') else 401
+        assert http.get('/api/accounts').status_code == expected
+
+
 @pytest.mark.asyncio
 async def test_manual_recovery_renews_deadline_without_resubmission(db, settings):
     account=ready(db)

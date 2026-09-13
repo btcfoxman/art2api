@@ -13,6 +13,8 @@
 
 复制 `.env.example` 为 `.env`，配置相互独立的 `ART_API_KEY`、`ART_ADMIN_TOKEN`（各至少 24 字符）和 Fernet `ART_ENCRYPTION_KEY`。运行 `docker compose up -d`。镜像选择由 workflow 的 `IMAGE_*` 临时环境变量传给 Compose，不写入应用 `.env`。
 
+管理登录使用 `ART_ADMIN_TOKEN`。公网可访问 `https://art2api.aiid.edu.kg/login`，内网可访问 `http://192.168.3.5:8797/login`。会话 Cookie 根据访问地址设置：内网 HTTP 可正常保留登录，HTTPS 及经 cloudflared 转发的公网域名保持 `Secure`。`ART_PUBLIC_BASE_URL` 保留公网 HTTPS 地址，无须为内网访问修改。
+
 本地开发安装 `requirements.txt`，并准备 Chromium/Chrome 与 PATH 中的 `ffprobe`。设置 `ART_CHROME_EXECUTABLE` 后运行 `uvicorn main:app --host 127.0.0.1 --port 8797`。浏览器使用原生 CDP WebSocket，没有 Playwright 依赖。Docker 镜像包含 Chromium、Xvfb、ffmpeg 和中文字体。默认在独立虚拟显示器中运行完整图形浏览器；`ART_BROWSER_HEADLESS=1` 可切换无头模式，但正常验证 SDK 可能拒绝该环境。
 
 ## 账号卡片

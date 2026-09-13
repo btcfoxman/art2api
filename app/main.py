@@ -148,8 +148,17 @@ def create_app(settings=None):
         if not hmac.compare_digest(token, settings.admin_token):
             return RedirectResponse('/login?error=1', status_code=303)
         response = RedirectResponse('/', status_code=303)
+        public_url = urlsplit(settings.public_base_url)
+        # Direct LAN HTTP needs an HTTP cookie. Keep the canonical HTTPS host
+        # secure through cloudflared even when the origin connection is HTTP.
+        # A forwarded scheme can only tighten this decision, never downgrade it.
+        secure_cookie = (
+            request.url.scheme == 'https'
+            or request.headers.get('x-forwarded-proto', '').split(',')[0].strip().lower() == 'https'
+            or (public_url.scheme == 'https' and request.url.hostname == public_url.hostname)
+        )
         response.set_cookie('art_session', session_value(int(time.time())+86400), httponly=True,
-                            secure=settings.public_base_url.startswith('https://'), samesite='lax', max_age=86400)
+                            secure=secure_cookie, samesite='lax', max_age=86400)
         return response
 
     @app.post('/logout', dependencies=[Depends(admin)])
