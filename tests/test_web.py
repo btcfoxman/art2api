@@ -203,6 +203,19 @@ def test_valid_wav_extension_does_not_bypass_duration_or_format_limits():
         WebClient.validate_media({'audio_urls':[asset]},context)
 
 
+@pytest.mark.parametrize('fps', [24, 24000/1001, 60, 17424000/290381])
+def test_nominal_boundary_fps_accepts_container_rounding(fps):
+    metadata={'fileName':'reference.mp4','byteSize':100,'durationMs':10083,'fps':fps}
+    WebClient.validate_media({'video_urls':[{'metadata':metadata}]}, {'minVideoFps':24,'maxVideoFps':60})
+
+
+@pytest.mark.parametrize('fps', [23, 23.9, 60.1, 61, 120])
+def test_fps_tolerance_does_not_accept_out_of_range_video(fps):
+    metadata={'fileName':'reference.mp4','byteSize':100,'durationMs':10083,'fps':fps}
+    with pytest.raises(ValueError,match='参考视频帧率不受支持：视频 1'):
+        WebClient.validate_media({'video_urls':[{'metadata':metadata}]}, {'minVideoFps':24,'maxVideoFps':60})
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize('failure', ['unreadable', 'unsigned', 'wrong_object', 'put_signature'])
 async def test_invalid_uploaded_media_never_reaches_generation(setup, failure):
@@ -265,6 +278,10 @@ async def test_generation_failure_preserves_safe_upstream_code_without_signed_ur
                               'reason':'OutputAudioSensitiveContentDetected.PolicyViolation: copyright restrictions https://private.example/?signature=secret'})
     assert review['error_code']=='generation_failed' and '音频' in review['error_message'] and '版权限制' in review['error_message']
     assert 'private.example' not in json.dumps(review) and 'signature' not in json.dumps(review)
+    video_review=generation_result({'status':'Failed','errorCode':'PROVIDER_CONTENT_SAFETY_VIOLATION',
+                                    'reason':'OutputVideoSensitiveContentDetected.PolicyViolation: copyright restrictions https://private.example/?signature=secret'})
+    assert '输出视频' in video_review['error_message'] and '版权限制' in video_review['error_message']
+    assert 'private.example' not in json.dumps(video_review) and 'signature' not in json.dumps(video_review)
     generic=generation_result({'status':'Failed','errorCode':'PROVIDER_CONTENT_SAFETY_VIOLATION','reason':'other policy violation'})
     assert '内容审核未通过' in generic['error_message'] and '版权' not in generic['error_message']
     audio=generation_result({'status':'Failed','errorCode':'FILE_OPTIMIZATION_FAILED',

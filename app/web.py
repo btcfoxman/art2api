@@ -18,7 +18,7 @@ from jsonschema import Draft202012Validator, ValidationError
 from app.catalog import local_schema
 from app.cookies import parse_cookie_header
 from app.errors import GatewayError
-from app.media import adapt_reference_video
+from app.media import adapt_reference_video, fps_in_range
 from app.network import client, public_media_url
 from app.web_catalog import GROUPS, generation_payload, generation_result, profiles, quote_input, validate_request
 
@@ -211,8 +211,10 @@ class WebClient:
                 if formats and extension and extension not in formats:
                     raise ValueError(f'Artlist 素材格式不受支持：{label} 为 {extension}；允许 {"、".join(formats)}')
                 if kind == 'Video' and meta.get('fps'):
-                    if (context.get('minVideoFps') and meta['fps']<context['minVideoFps']) or (context.get('maxVideoFps') and meta['fps']>context['maxVideoFps']):
-                        raise ValueError('Artlist 参考视频帧率不受支持')
+                    lower, upper = context.get('minVideoFps'), context.get('maxVideoFps')
+                    if not fps_in_range(meta['fps'], lower, upper):
+                        bounds = '、'.join(filter(None, [f'至少 {lower:g}fps' if lower else '', f'最多 {upper:g}fps' if upper else '']))
+                        raise ValueError(f'Artlist 参考视频帧率不受支持：视频 {index} 为 {meta["fps"]:g}fps；要求{bounds}')
                 for key, compare in [('minUploaded'+kind+'Duration', lambda n: duration<n), ('maxUploaded'+kind+'Duration', lambda n: duration>n)]:
                     if context.get(key) and compare(context[key]):
                         bound = '至少' if key.startswith('min') else '最多'

@@ -11,10 +11,11 @@ from app.web_catalog import quote_input
 
 
 @pytest.mark.asyncio
-async def test_matching_reference_passes_unchanged_and_strict_conflict_is_clear():
+@pytest.mark.parametrize('fps', [30, 17424000/290381])
+async def test_matching_reference_passes_unchanged_and_strict_conflict_is_clear(fps):
     path = Path('original.mp4')
     request = {'duration': 4, 'aspect_ratio': '9:16'}
-    metadata = {'width': 720, 'height': 1280, 'durationMs': 4096, 'fps': 30}
+    metadata = {'width': 720, 'height': 1280, 'durationMs': 4096, 'fps': fps}
     with patch('app.media.run_media_command', AsyncMock()) as command:
         assert await adapt_reference_video(path, metadata, request, 'strict') == (path, metadata, None)
         with pytest.raises(ValueError, match='跟随素材规格'):

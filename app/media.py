@@ -3,8 +3,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from contextlib import suppress
 from pathlib import Path
+
+
+def fps_in_range(fps, lower=None, upper=None):
+    # Container timestamps can make nominal 60fps measure 60.0039fps. The
+    # 0.1% tolerance also covers fractional nominal rates such as 24000/1001.
+    if not math.isfinite(fps) or fps <= 0:
+        return False
+    return not ((lower and fps < lower and not math.isclose(fps, lower, rel_tol=.001, abs_tol=.01))
+                or (upper and fps > upper and not math.isclose(fps, upper, rel_tol=.001, abs_tol=.01)))
 
 
 async def run_media_command(*args, timeout=180):
@@ -48,7 +58,7 @@ def reference_spec(metadata, request):
 
 async def adapt_reference_video(path: Path, metadata, request, policy):
     ratio, ratio_matches, duration_matches, resolution_matches = reference_spec(metadata, request)
-    if ratio_matches and duration_matches and resolution_matches and 24 <= metadata.get('fps', 0) <= 60:
+    if ratio_matches and duration_matches and resolution_matches and fps_in_range(metadata.get('fps', 0), 24, 60):
         return path, metadata, None
     before = {key: metadata.get(key) for key in ('width', 'height', 'durationMs', 'fps')}
     if policy == 'strict':
