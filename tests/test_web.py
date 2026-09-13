@@ -15,7 +15,7 @@ from app.db import Database
 from app.errors import GatewayError
 from app.service import Service
 from app.web import WebClient, unwrap
-from app.web_catalog import GROUPS, generation_payload, generation_result, profiles, quote_input, validate_request
+from app.web_catalog import GROUPS, generation_payload, generation_result, profiles, quote_input, reference_prompt, validate_request
 
 MODEL = 'sd-2-5-480p'
 CAPTURE = json.loads(Path(__file__).with_name('fixtures').joinpath('web_generation.json').read_text())
@@ -50,7 +50,9 @@ def test_all_requested_models_have_captured_group_and_exact_resolution():
 
 
 def test_multimodal_wire_payload_preserves_order_duration_and_audio_false():
-    request=normalize_request({'model':MODEL,'prompt':'@img1 meets @img2','generate_audio':False,'duration':4})
+    request=normalize_request({'model':MODEL,'prompt':'@img1 meets @img2; motion @vid1 @vid2, sound @aud1','generate_audio':False,'duration':4,
+                               'image_urls':['https://media.example/a','https://media.example/b'],
+                               'video_urls':['https://media.example/v1','https://media.example/v2'],'audio_urls':['https://media.example/a1']})
     def asset(name,milliseconds=None):
         return {'file_key':name,'file_url':'https://storage.example/'+name,'metadata':{'byteSize':100,'mimeType':'video/mp4' if milliseconds else 'image/png',**({'durationMs':milliseconds} if milliseconds else {})}}
     assets={'image_urls':[asset('a'),asset('b')],'video_urls':[asset('v1',10000),asset('v2',5088)],'audio_urls':[asset('audio',5146)]}
@@ -64,6 +66,37 @@ def test_multimodal_wire_payload_preserves_order_duration_and_audio_false():
     payload=generation_payload('session-1',resolved,inputs,settings,artifacts,'operator-verification')
     assert payload['modelGroupId']==3011 and payload['costQuoteDigitalSignature']=='fresh-signature'
     assert payload['inputs']['video_urls'][1]['fileUrl'].endswith('v2')
+
+
+def test_reference_aliases_match_prompt_and_keep_original_asset_indices():
+    request=normalize_request({'model':MODEL,'prompt':'保留@视频1 的动作，使用@参考2 的形象和@参考1 的服装，声音@音频1。再次@参考2。',
+                               'image_urls':['https://media.example/first','https://media.example/second'],
+                               'video_urls':['https://media.example/motion'],'audio_urls':['https://media.example/sound']})
+    assets={field:[{'file_key':str(i),'file_url':url,'metadata':{'durationMs':4000}} for i,url in enumerate(request[field])]
+            for field in ['image_urls','video_urls','audio_urls']}
+    quote,inputs,settings,_=quote_input(request,assets)
+    expected='保留@vid1 的动作，使用@img2 的形象和@img1 的服装，声音@aud1。再次@img2。'
+    assert quote['input']['prompt']==inputs['prompt']==settings['prompt']==expected
+    assert inputs['tagReferences']==settings['tagReferences']==[
+        {'tagId':'@img1','type':'@img','orderForType':1}, {'tagId':'@img2','type':'@img','orderForType':2},
+        {'tagId':'@vid1','type':'@vid','orderForType':1}, {'tagId':'@aud1','type':'@aud','orderForType':1}]
+    assert [v['fileUrl'] for v in inputs['image_urls']]==request['image_urls']
+    partial={**request,'prompt':'仅使用@image2，重复@IMG2，普通文字。'}
+    assert reference_prompt(partial)==('仅使用@img2，重复@img2，普通文字。',[{'tagId':'@img2','type':'@img','orderForType':2}])
+
+
+def test_media_without_prompt_mentions_does_not_invent_reference_tags():
+    request=normalize_request({'model':MODEL,'prompt':'根据图片生成视频，保持原图风格。','image_urls':['https://media.example/image']})
+    quote,inputs,settings,artifacts=quote_input(request,{'image_urls':[{'file_key':'image','file_url':request['image_urls'][0],'metadata':{}}]})
+    assert 'tagReferences' not in inputs and 'tagReferences' not in settings and 'tagReferences' not in quote['input']
+    assert len(inputs['image_urls'])==len(artifacts)==1
+
+
+@pytest.mark.parametrize('prompt',['@参考2','@img0','@视频1','@audio1'])
+def test_missing_prompt_reference_is_rejected_before_upload(prompt):
+    request=normalize_request({'model':MODEL,'prompt':prompt,'image_urls':['https://media.example/one']})
+    with pytest.raises(ValueError,match='没有对应素材'):
+        validate_request(request,profiles()[MODEL])
 
 
 def test_start_end_frames_are_not_silently_merged_into_references():

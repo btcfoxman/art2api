@@ -54,27 +54,56 @@ def validate_request(request, profile):
         raise ValueError('网页抓包未提供 seed/fps 设置，不能静默忽略')
     if 'generate_audio' in request and not isinstance(request['generate_audio'], bool):
         raise ValueError('generate_audio 必须为布尔值')
+    reference_prompt(request)
+
+
+def reference_prompt(request):
+    """Translate client reference labels, keeping their original asset indices.
+
+    Artlist rejects tagReferences whose tagId isn't present in the prompt.
+    Unmentioned assets remain inputs but must not invent reference tags.
+    """
+    prompt = request['prompt']
+    if request.get('first_frame'):
+        return prompt, []
+    referenced = set()
+    for field, prefix, aliases in [
+        ('image_urls', '@img', r'img|image|参考(?:图片|图像|图)?|图片|图像|图'),
+        ('video_urls', '@vid', r'vid|video|(?:参考)?视频'),
+        ('audio_urls', '@aud', r'aud|audio|(?:参考)?音频|声音|语音'),
+    ]:
+        def replace(match):
+            index = int(match.group(1))
+            if not 1 <= index <= len(request.get(field) or []):
+                raise ValueError(f'提示词引用的 {prefix}{index} 没有对应素材')
+            tag = f'{prefix}{index}'
+            referenced.add((field, prefix, index))
+            return tag
+        prompt = re.sub(r'@(?:'+aliases+r')(\d+)(?![0-9A-Za-z_])', replace, prompt, flags=re.IGNORECASE)
+    order = {'image_urls':0, 'video_urls':1, 'audio_urls':2}
+    tags = [{'tagId':f'{prefix}{index}', 'type':prefix, 'orderForType':index}
+            for field,prefix,index in sorted(referenced,key=lambda value:(order[value[0]],value[2]))]
+    return prompt, tags
 
 
 def quote_input(request, assets):
     group = GROUPS[request['model']]
     defaults = SNAPSHOT['groups'][str(group)]['defaults']
     settings = {k: request[k] for k in ('prompt', 'duration', 'resolution', 'aspect_ratio')}
+    prompt, tags = reference_prompt(request)
+    settings['prompt'] = prompt
     settings['generate_audio'] = request.get('generate_audio', defaults.get('generate_audio') == 'true')
     if 'generation_mode' in defaults:
         modes = SNAPSHOT['groups'][str(group)]['settings']['generation_mode']['values']
         settings['generation_mode'] = next((v for v in modes if str(v).lower() == 'endframe'), 'endFrame') if request.get('first_frame') else 'references'
-    inputs = {'prompt': request['prompt']}
-    artifacts, metadata, tags = [], {}, []
+    inputs = {'prompt': prompt}
+    artifacts, metadata = [], {}
     for field, values in assets.items():
         if not values:
             continue
         wire = {'first_frame': 'image_url', 'last_frame': 'end_frame'}.get(field, field)
         media = [{'fileUrl': a['file_url'], **({'url': a['file_url']} if field in {'video_urls', 'audio_urls'} else {})} for a in values]
         inputs[wire] = values[0]['file_url'] if field in {'first_frame', 'last_frame'} else media
-        if field in {'image_urls', 'video_urls', 'audio_urls'}:
-            prefix = {'image_urls': '@img', 'video_urls': '@vid', 'audio_urls': '@aud'}[field]
-            tags.extend({'tagId': f'{prefix}{i}', 'type': prefix, 'orderForType': i} for i in range(1, len(values)+1))
         if field in {'video_urls', 'audio_urls'}:
             metadata[field] = [{'duration': a['metadata']['durationMs']/1000} for a in values]
         for asset in values:
@@ -107,6 +136,8 @@ def generation_result(data):
         # Reasons can contain signed media URLs. Expose the structured code and
         # a safe explanation, never the arbitrary upstream reason string.
         message = 'Artlist 无法读取参考素材' if code=='INPUT_URL_UNREACHABLE' else 'Artlist 明确报告生成失败'
+        if code=='MAP_INTERNAL_REQUEST_TO_PROVIDER_REQUEST_FAILED' and 'Reference tag not found in prompt' in str(data.get('reason','')):
+            message = 'Artlist 提示词引用标签与素材不一致'
         if code:
             message += f'（{code}）'
         return {'status':'failed','error_code':'generation_failed','error_message':message,
