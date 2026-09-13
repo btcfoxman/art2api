@@ -3,6 +3,7 @@ from __future__ import annotations
 
 
 QUEUE_LIMIT = '上游队列排队限额，请稍后再试~'
+UPSTREAM_MAINTENANCE = '上游维护中，请稍后再试~'
 CONTENT_POLICY = '检测到内容有敏感或违规情况，请修改后重试，积分已返还～'
 REFERENCE_PERSON = '参考图片中检测到可能存在真人，暂不支持，请更换图片后重试，积分已返还~'
 INPUT_PERSON = '检测到输入图片可能包含真人，生成失败，请修改后重试，积分已返还~'
@@ -27,7 +28,7 @@ PUBLIC_MESSAGES = frozenset({
     QUEUE_LIMIT, CONTENT_POLICY, REFERENCE_PERSON, INPUT_PERSON, OUTPUT_VIDEO_POLICY,
     TEXT_RETRY, VIDEO_RETRY, TEXT_EDIT, VIDEO_POLICY, IMAGE_POLICY, CONTENT_RETRY,
     IMAGE_EDIT, TEXT_POLICY, QUEUE_INTERRUPTED, MEDIA_DURATION, MEDIA_LIMIT,
-    MEDIA_FORMAT, MEDIA_DOWNLOAD, MEDIA_EXTERNAL, GENERATION_FAILED,
+    MEDIA_FORMAT, MEDIA_DOWNLOAD, MEDIA_EXTERNAL, GENERATION_FAILED, UPSTREAM_MAINTENANCE,
 })
 
 # These generic codes carry routing/idempotency semantics. Never echo arbitrary
@@ -47,6 +48,12 @@ def public_message(code='', message='', upstream_code=''):
     if message in PUBLIC_MESSAGES:
         return message
     text = f'{upstream_code} {message}'.lower()
+    maintenance_codes = {'maintenance', 'maintenance_mode', 'service_maintenance',
+                         'upstream_maintenance', 'service_under_maintenance', 'model_under_maintenance'}
+    if str(code).lower() in maintenance_codes or str(upstream_code).lower() in maintenance_codes or any(
+        phrase in text for phrase in ('under maintenance', 'scheduled maintenance', 'maintenance mode', '维护中', '正在维护', '系统维护')
+    ):
+        return UPSTREAM_MAINTENANCE
     if code in {'entitlement_unavailable', 'rate_limited'} or any(word in text for word in (
         'insufficient_credits', '积分不足', '额度', '并发', 'queue is full', 'rate limit', '排队限额',
     )):

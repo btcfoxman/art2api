@@ -13,7 +13,7 @@ from app.public_errors import (
     PUBLIC_MESSAGES, public_message, QUEUE_LIMIT, QUEUE_INTERRUPTED, CONTENT_POLICY,
     OUTPUT_VIDEO_POLICY, INPUT_PERSON, REFERENCE_PERSON, TEXT_POLICY, IMAGE_POLICY,
     VIDEO_POLICY, MEDIA_DURATION, MEDIA_LIMIT, MEDIA_FORMAT, MEDIA_DOWNLOAD,
-    MEDIA_EXTERNAL, GENERATION_FAILED,
+    MEDIA_EXTERNAL, GENERATION_FAILED, UPSTREAM_MAINTENANCE,
 )
 from app.web_catalog import generation_result, profiles
 
@@ -62,6 +62,10 @@ def assert_public(response, status, message=None):
     ('media_unreachable', 'Artlist 上传素材不可读取', '', MEDIA_DOWNLOAD),
     ('submission_unknown', 'INSUFFICIENT_CREDITS', '', QUEUE_INTERRUPTED),
     ('upstream_outcome_unknown', 'Artlist deadline exceeded', '', QUEUE_INTERRUPTED),
+    ('generation_failed', 'temporarily unavailable', 'SERVICE_UNDER_MAINTENANCE', UPSTREAM_MAINTENANCE),
+    ('upstream_maintenance', 'Artlist 正在维护', '', UPSTREAM_MAINTENANCE),
+    ('web_upstream_error', 'Artlist 网页上游服务异常', '', QUEUE_INTERRUPTED),
+    ('submission_unknown', 'Artlist under maintenance', 'SERVICE_MAINTENANCE', QUEUE_INTERRUPTED),
 ])
 def test_actual_failure_categories_choose_only_approved_literals(code, diagnostic, upstream, expected):
     assert public_message(code, diagnostic+' '+PRIVATE, upstream) == expected
@@ -72,7 +76,9 @@ def test_new_upstream_failures_store_safe_category_without_raw_reason():
                                 'reason':'InputImage real person '+PRIVATE})
     assert result['public_error_message'] == INPUT_PERSON
     assert 'private-token' not in json.dumps(result)
-    assert len(PUBLIC_MESSAGES) == 20
+    maintenance = generation_result({'status':'Failed', 'errorCode':'SERVICE_MAINTENANCE', 'reason':PRIVATE})
+    assert maintenance['public_error_message'] == UPSTREAM_MAINTENANCE
+    assert len(PUBLIC_MESSAGES) == 21
     for literal in PUBLIC_MESSAGES:
         assert public_message('generation_failed', literal) == literal
 
@@ -97,6 +103,8 @@ def test_external_sync_errors_and_framework_failures_never_echo_diagnostics(api,
     app.state.service.create = AsyncMock(side_effect=GatewayError(PRIVATE, 'entitlement_unavailable', 503))
     result = assert_public(http.post(path, headers=headers, json={}), 503, QUEUE_LIMIT)
     assert result['error']['code'] == 'entitlement_unavailable'
+    app.state.service.create = AsyncMock(side_effect=GatewayError(PRIVATE+' under maintenance', 'upstream_maintenance', 503))
+    assert_public(http.post(path, headers=headers, json={}), 503, UPSTREAM_MAINTENANCE)
     app.state.service.create = AsyncMock(side_effect=GatewayError(PRIVATE, 'artlist_secret_error', 502))
     result = assert_public(http.post(path, headers=headers, json={}), 502)
     assert result['error']['code'] == 'upstream_error'
