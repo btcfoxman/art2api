@@ -93,6 +93,10 @@ def quote_input(request, assets):
     prompt, tags = reference_prompt(request)
     settings['prompt'] = prompt
     settings['generate_audio'] = request.get('generate_audio', defaults.get('generate_audio') == 'true')
+    # Seedance 2.5's reference-video submodel requires auto and inherits the
+    # uploaded video's shape/duration. prepare() first adapts or validates it.
+    if group == 515 and assets.get('video_urls'):
+        settings['aspect_ratio'] = 'auto'
     if 'generation_mode' in defaults:
         modes = SNAPSHOT['groups'][str(group)]['settings']['generation_mode']['values']
         settings['generation_mode'] = next((v for v in modes if str(v).lower() == 'endframe'), 'endFrame') if request.get('first_frame') else 'references'
@@ -142,6 +146,11 @@ def generation_result(data):
                 message = 'Artlist 输出音频审核未通过'
                 if 'copyright' in str(data.get('reason', '')).lower():
                     message = 'Artlist 拒绝输出音频：可能涉及版权限制，请调整音频相关请求或参考素材'
+        if code == 'FILE_OPTIMIZATION_FAILED':
+            message = 'Artlist 参考素材预处理失败'
+            reason = str(data.get('reason', '')).lower()
+            if 'input audio' in reason and 'sensitive' in reason:
+                message = 'Artlist 参考音频审核未通过，请检查音频素材'
         if code=='MAP_INTERNAL_REQUEST_TO_PROVIDER_REQUEST_FAILED' and 'Reference tag not found in prompt' in str(data.get('reason','')):
             message = 'Artlist 提示词引用标签与素材不一致'
         if code:

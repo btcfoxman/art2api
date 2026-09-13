@@ -47,10 +47,12 @@ def test_settings_access_validation_and_restart_persistence(config):
             'poll_interval_seconds': 7, 'task_timeout_seconds': 1200,
             'request_timeout_seconds': 90, 'queue_limit': 200,
             'browser_timeout_seconds': 300, 'browser_headless': True,
+            'sd25_video_policy': 'strict',
         }).json()
         assert saved['queue_limit'] == 200 and config.poll_interval == 7
         assert app.state.service.settings.task_timeout == 1200
         assert app.state.service.browsers.settings.browser_headless is True
+        assert app.state.service.settings.sd25_video_policy == 'strict'
         assert all(secret not in str(saved) for secret in (config.api_key, config.admin_token, config.encryption_key))
     # Fresh environment values are overridden only for explicitly saved fields.
     with TestClient(create_app(original)) as http:

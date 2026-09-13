@@ -219,7 +219,7 @@ class Service:
                             actual = min(dimensions.get('width',0),dimensions.get('height',0))
                             if actual and actual+16<expected:
                                 raise GatewayError('结果分辨率低于请求，等待上游高清输出', 'output_pending', retryable=True)
-                        self.db.update_task(task_id, status=status, result={'video_url': url, **({'output_id':data.get('output_id'),'metadata':data.get('metadata')} if web else {})}, error='', error_code='')
+                        self.db.update_task(task_id, status=status, result={**self.db.task(task_id)['result'], 'video_url': url, **({'output_id':data.get('output_id'),'metadata':data.get('metadata')} if web else {})}, error='', error_code='')
                         self.db.event('task_succeeded', 'Video result ready', account['id'], task_id)
                         return
                     if status == 'failed':
@@ -297,6 +297,7 @@ class Service:
         url = result.get('video_url', '')
         status = 'failed' if task['status'] == 'submission_unknown' else task['status']
         return {'id': task['id'], 'object': 'video', 'status': status, 'model': task['request']['model'],
+                **({'media_processing': result['media_processing']} if result.get('media_processing') else {}),
                 'progress': 100 if status in {'succeeded', 'failed'} else 10 if status == 'queued' else 30,
                 'created_at': task['created_at'], 'updated_at': task['updated_at'],
                 'content': {'video_url': url} if url else {}, 'data': [{'url': url, 'type': 'video'}] if url else [],

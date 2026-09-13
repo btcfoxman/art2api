@@ -120,7 +120,7 @@ $('#taskLimit').onchange = () => { state.taskLimit = Number($('#taskLimit').valu
 $('#previousPage').onclick = () => { if (state.page > 0) { state.page--; refresh().catch(error => toast(error.message)); } };
 $('#nextPage').onclick = () => { if ((state.page+1)*state.taskLimit < state.overview.total) { state.page++; refresh().catch(error => toast(error.message)); } };
 $('#tasksRefresh').onclick = event => busy(event.currentTarget, refresh);
-const runtimeFields = ['queue_limit','task_timeout_seconds','poll_interval_seconds','request_timeout_seconds','browser_timeout_seconds','browser_headless'];
+const runtimeFields = ['queue_limit','task_timeout_seconds','poll_interval_seconds','request_timeout_seconds','browser_timeout_seconds','browser_headless','sd25_video_policy'];
 let settingsBaseline = {};
 $('#settingsButton').onclick = event => busy(event.currentTarget, async () => {
   const settings = await api('/api/settings'); state.settings = settings; settingsBaseline = {...settings};
@@ -137,7 +137,7 @@ $('#settingsForm').onsubmit = event => {
   event.preventDefault(); const form = event.target;
   busy(form.querySelector('[type=submit]'), async () => {
     const values = {};
-    for (const key of runtimeFields) { const input = form.elements[key], value = input.type === 'checkbox' ? input.checked : Number(input.value); if (value !== settingsBaseline[key]) values[key] = value; }
+    for (const key of runtimeFields) { const input = form.elements[key], value = input.type === 'checkbox' ? input.checked : input.tagName === 'SELECT' ? input.value : Number(input.value); if (value !== settingsBaseline[key]) values[key] = value; }
     try { if (Object.keys(values).length) state.settings = await api('/api/settings', {method:'PATCH', body:JSON.stringify(values)}); }
     catch (error) { $('#settingsHint').textContent = error.message; $('#settingsHint').classList.add('error-note'); throw error; }
     const limit = Number(form.elements.task_limit.value); if (limit !== state.taskLimit) state.page = 0;
@@ -150,6 +150,10 @@ $('#settingsForm').onsubmit = event => {
 function openTaskDetail(task) {
   const fields = [['本地任务', task.id],['上游任务', task.upstream_id || '—'],['账号', state.accounts.find(a => a.id === task.account_id)?.name || task.account_id],['模型', task.model],['生成参数', `${task.request.duration} 秒 · ${task.request.resolution} · ${task.request.aspect_ratio}`],['状态', labels[task.internal_status] || task.internal_status],['创建 / 更新', `${stamp(task.created_at)} / ${stamp(task.updated_at)}`]];
   if (task.error) fields.push(['错误代码', task.error.code],['错误详情', task.error.message]);
+  for (const record of task.media_processing || []) {
+    const spec = value => `${value.width}×${value.height} / ${(value.durationMs/1000).toFixed(3)} 秒 / ${value.fps}fps`;
+    fields.push([`参考视频 ${record.index} 适配`, `${spec(record.before)} → ${spec(record.after)}；${record.actions.join('；')}`]);
+  }
   const links = [['生成视频', task.content?.video_url], ...['image_urls','video_urls','audio_urls'].flatMap((key, kind) => (task.request[key] || []).map((url, i) => [`${['参考图片','参考视频','参考音频'][kind]} ${i+1}`, url]))];
   $('#taskDetail').innerHTML = `<dl class="detail-grid">${fields.map(([key,value]) => `<dt>${esc(key)}</dt><dd>${esc(value)}</dd>`).join('')}</dl><p class="field-title">完整提示词</p><div class="detail-prompt">${esc(task.request.prompt)}</div><div class="detail-links">${links.filter(([,url]) => safeUrl(url)).map(([label,url]) => `<a href="${esc(safeUrl(url))}" target="_blank" rel="noopener noreferrer">${esc(label)} ↗</a>`).join('')}</div>`;
   $('#taskDetailDialog').showModal();

@@ -18,6 +18,7 @@ from jsonschema import Draft202012Validator, ValidationError
 from app.catalog import local_schema
 from app.cookies import parse_cookie_header
 from app.errors import GatewayError
+from app.media import adapt_reference_video
 from app.network import client, public_media_url
 from app.web_catalog import GROUPS, generation_payload, generation_result, profiles, quote_input, validate_request
 
@@ -219,7 +220,7 @@ class WebClient:
             if assets.get(field) and context.get(flag) is False:
                 raise ValueError('Artlist 子模型不支持首尾帧设置')
 
-    async def upload(self, url, kind):
+    async def upload(self, url, kind, *, reference_request=None):
         public_media_url(url)
         async with client(self.secret()['proxy_url'], max(120, self.settings.request_timeout)) as http:
             for _ in range(4):
@@ -245,6 +246,7 @@ class WebClient:
             suffix = mimetypes.guess_extension(mime) or '.bin'
             filename = uuid.uuid4().hex+suffix
             metadata = {'mimeType': mime, 'fileName': filename, 'byteSize': len(content)}
+            processing = None
             with tempfile.TemporaryDirectory(prefix='art-media-') as directory:
                 path = Path(directory)/filename
                 path.write_bytes(content)
@@ -270,6 +272,14 @@ class WebClient:
                         metadata['fps'] = float(Fraction(visual.get('avg_frame_rate', '0/1')))
                     except (ValueError, ZeroDivisionError):
                         raise ValueError('参考视频缺少有效帧率') from None
+                if kind == 'video' and reference_request is not None:
+                    path, metadata, processing = await adapt_reference_video(
+                        path, metadata, reference_request, self.settings.sd25_video_policy)
+                    if processing:
+                        content = bytearray(path.read_bytes())
+                        if len(content) > 150*1024*1024:
+                            raise ValueError('参考视频转换后超过 150 MiB')
+                        mime, filename = metadata['mimeType'], metadata['fileName']
             request={'fileName':filename,'fileType':mime,'expiresIn':86400}
             request.update({k:metadata[k] for k in ('width','height') if k in metadata})
             signed=await self.rpc('uploadRouter.getPresignedUrl',request,post=True)
@@ -297,7 +307,8 @@ class WebClient:
             async with http.stream('GET',readable,headers={'Range':'bytes=0-0'}) as access:
                 if access.status_code not in {200,206}:
                     raise GatewayError(f'Artlist 上传素材不可读取（HTTP {access.status_code}）', 'media_unreachable', 422)
-            return {'file_key':signed['fileKey'],'file_url':readable,'metadata':metadata}
+            return {'file_key':signed['fileKey'],'file_url':readable,'metadata':metadata,
+                    **({'processing': processing} if processing else {})}
 
     async def prepare(self, task):
         request=task['request']
@@ -306,7 +317,12 @@ class WebClient:
         for field,kind in [('image_urls','image'),('video_urls','video'),('audio_urls','audio'),('first_frame','image'),('last_frame','image')]:
             urls=request.get(field) or []
             if isinstance(urls,str):urls=[urls]
-            assets[field]=[await self.upload(url,kind) for url in urls]
+            options = {'reference_request': request} if field == 'video_urls' and task['profile']['group_id'] == 515 else {}
+            assets[field]=[await self.upload(url,kind,**options) for url in urls]
+            records = [{**asset['processing'], 'field': key, 'index': index+1}
+                       for key, values in assets.items() for index, asset in enumerate(values) if asset.get('processing')]
+            if records:
+                self.db.update_task(task['id'], result={**self.db.task(task['id'])['result'], 'media_processing': records})
         # A cold browser verification may take tens of seconds. Obtain the
         # short-lived cost signature only after normal verification completes.
         token=self.db.take_verification(task['id'])
@@ -323,7 +339,7 @@ class WebClient:
         session=await self.rpc('chatSession.createChatSession',session_input,post=True)
         if not session.get('id'):
             raise GatewayError('Artlist 未返回会话 ID', 'web_protocol_error')
-        self.db.update_task(task['id'],result={'chat_session_id':session['id'],'resolved_model_id':quote['modelId'], 'quote_age_seconds': round(time.monotonic()-quoted_at,3), 'verification': 'token' if verification.get('token') else 'client_error' if verification.get('client_error') else 'none'})
+        self.db.update_task(task['id'],result={**self.db.task(task['id'])['result'], 'chat_session_id':session['id'],'resolved_model_id':quote['modelId'], 'quote_age_seconds': round(time.monotonic()-quoted_at,3), 'verification': 'token' if verification.get('token') else 'client_error' if verification.get('client_error') else 'none'})
         payload = generation_payload(session['id'],quote,inputs,settings,artifacts,verification.get('token', ''))
         if verification.get('client_error'):
             payload['turnstileClientError'] = verification['client_error']

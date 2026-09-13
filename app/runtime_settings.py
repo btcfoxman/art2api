@@ -1,4 +1,5 @@
 from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal
 
 
 class RuntimePatch(BaseModel):
@@ -9,6 +10,7 @@ class RuntimePatch(BaseModel):
     queue_limit: int | None = Field(default=None, ge=1, le=10000)
     browser_timeout_seconds: int | None = Field(default=None, ge=60, le=7200)
     browser_headless: bool | None = None
+    sd25_video_policy: Literal['adjust', 'strict'] | None = None
 
 
 FIELDS = {
@@ -18,6 +20,7 @@ FIELDS = {
     'queue_limit': 'queue_limit',
     'browser_timeout_seconds': 'browser_timeout',
     'browser_headless': 'browser_headless',
+    'sd25_video_policy': 'sd25_video_policy',
 }
 
 

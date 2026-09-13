@@ -58,6 +58,7 @@ def test_multimodal_wire_payload_preserves_order_duration_and_audio_false():
     assets={'image_urls':[asset('a'),asset('b')],'video_urls':[asset('v1',10000),asset('v2',5088)],'audio_urls':[asset('audio',5146)]}
     quote,inputs,settings,artifacts=quote_input(request,assets)
     assert quote['modelGroupId']==515
+    assert quote['input']['aspect_ratio']==settings['aspect_ratio']=='auto'
     assert settings['generate_audio'] is False
     assert settings['user_inputs_metadata']['video_urls']==[{'duration':10.0},{'duration':5.088}]
     assert [t['tagId'] for t in inputs['tagReferences']]==['@img1','@img2','@vid1','@vid2','@aud1']
@@ -246,6 +247,11 @@ async def test_generation_failure_preserves_safe_upstream_code_without_signed_ur
     assert 'private.example' not in json.dumps(review) and 'signature' not in json.dumps(review)
     generic=generation_result({'status':'Failed','errorCode':'PROVIDER_CONTENT_SAFETY_VIOLATION','reason':'other policy violation'})
     assert '内容审核未通过' in generic['error_message'] and '版权' not in generic['error_message']
+    audio=generation_result({'status':'Failed','errorCode':'FILE_OPTIMIZATION_FAILED',
+                             'reason':'Asset processing returned Failed: the input audio may contain sensitive information https://private.example'})
+    assert '参考音频审核未通过' in audio['error_message'] and 'private.example' not in str(audio)
+    optimization=generation_result({'status':'Failed','errorCode':'FILE_OPTIMIZATION_FAILED','reason':'other failure'})
+    assert '预处理失败' in optimization['error_message'] and '审核' not in optimization['error_message']
 
 
 @pytest.mark.asyncio

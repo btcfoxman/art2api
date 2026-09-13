@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>ART2API Console</title><link rel="stylesheet" href="/static/styles.css?v=0.3.0"><script src="/static/app.js?v=0.3.0" defer></script></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>ART2API Console</title><link rel="stylesheet" href="/static/styles.css?v=0.3.2"><script src="/static/app.js?v=0.3.2" defer></script></head>
 <body><main class="shell">
   <header class="mast">
     <div class="brand"><span class="brand-mark">AR</span><div><p>ARTLIST PROTOCOL GATEWAY</p><h1>ART2API <span>Console</span></h1></div></div>
@@ -72,6 +72,7 @@
       <label>自动刷新<select name="refresh_seconds"><option value="0">关闭自动刷新</option><option value="5">每 5 秒</option><option value="15">每 15 秒</option><option value="30">每 30 秒</option><option value="60">每 60 秒</option></select><small>页面处于后台时暂停刷新，回到前台后更新。</small></label>
       <div class="settings-note"><span data-icon="layers"></span><p>运行任务、成功与失败数量始终按全量任务统计，不受分页或每页条数影响。</p></div>
     </fieldset>
+    <fieldset class="settings-card settings-wide"><legend>参考视频适配</legend><div class="integration-grid"><label>Seedance 2.5 参考视频规格<select name="sd25_video_policy"><option value="adjust">自动适配目标时长和比例</option><option value="strict">严格保留素材，冲突时拒绝</option></select><small>适用于后续准备的任务；处理记录保存在任务详情及查询结果中。</small></label><p class="card-note">此模式由上游跟随参考视频的时长与比例。自动适配会将整段视频变速压缩或延长到目标时长，缩放并加黑边保留完整画面，转换为短边 720px、30fps 的 MP4；已有音轨同步变速。严格模式要求素材与请求规格匹配。原始素材不会被修改。</p></div></fieldset>
     <fieldset class="settings-card settings-wide"><legend>渠道接入与模型</legend><div class="integration-grid"><div><label>服务公开地址<input id="publicBaseUrl" readonly class="mono"></label><label>MCP 上游地址<input id="mcpUrl" readonly class="mono"></label><p class="card-note">以上地址由部署配置提供。管理登录使用 ART_ADMIN_TOKEN，lingya2api 渠道鉴权使用 ART_API_KEY。</p></div><div><p class="field-title">内置模型 <span class="caption">账号授权并启用后可调用</span></p><div id="settingsModels" class="model-list"></div></div></div></fieldset>
   </div>
   <footer><p class="caption" id="settingsHint" role="status">服务端设置重启后保留；未保存的修改不会生效。</p><div><button type="button" class="close">取消</button><button type="submit" class="primary"><span data-icon="save"></span>保存设置</button></div></footer>

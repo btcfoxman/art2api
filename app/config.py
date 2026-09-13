@@ -20,8 +20,9 @@ class Settings:
     chrome_executable: str = field(default_factory=lambda: os.getenv("ART_CHROME_EXECUTABLE", ""))
     browser_headless: bool = field(default_factory=lambda: os.getenv('ART_BROWSER_HEADLESS', '0').lower() in {'1','true','yes'})
     browser_timeout: int = 900
+    sd25_video_policy: str = 'adjust'
     oauth_client_id: str = field(default_factory=lambda: os.getenv("ART_OAUTH_CLIENT_ID", ""))
-    version: str = "0.3.1"
+    version: str = "0.3.2"
 
     def validate(self):
         if len(self.api_key) < 24 or len(self.admin_token) < 24:
