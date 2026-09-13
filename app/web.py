@@ -308,6 +308,7 @@ class WebClient:
         data=await self.rpc('userGenerationRouter.createUserGeneration',payload,post=True)
         if not isinstance(data,dict) or not data.get('id'):
             raise GatewayError('提交响应未包含生成任务 ID，不能自动重提', 'submission_unknown', ambiguous=True)
+        self.db.update_account(self.account_id, last_error='')
         return str(data['id'])
 
     async def query(self, generation_id):

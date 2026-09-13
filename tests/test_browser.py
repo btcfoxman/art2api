@@ -1,4 +1,6 @@
 from unittest.mock import AsyncMock
+import os
+import socket
 
 import pytest
 
@@ -28,3 +30,20 @@ async def test_native_verification_blocks_paid_browser_request_and_forwards_actu
     assert blocked < navigation
     assert calls[blocked].args[1]['urls'] == ['*createUserGeneration*']
     assert all(not c.args[0].startswith('Input.') for c in calls)
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='Chromium singleton symlinks are Linux-specific')
+def test_stopped_container_profile_lock_is_removed_under_exclusive_guard(tmp_path):
+    (tmp_path/'SingletonLock').symlink_to('previous-container-123')
+    (tmp_path/'SingletonSocket').symlink_to('/tmp/previous-browser/socket')
+    (tmp_path/'SingletonCookie').symlink_to('12345')
+    (tmp_path/'Cookies').write_text('preserve private profile')
+    guard=BrowserManager.profile_guard(tmp_path)
+    try:
+        assert not (tmp_path/'SingletonLock').is_symlink()
+        assert (tmp_path/'Cookies').read_text()=='preserve private profile'
+        with pytest.raises(BlockingIOError):BrowserManager.profile_guard(tmp_path)
+    finally:guard.close()
+    (tmp_path/'SingletonLock').symlink_to(f'{socket.gethostname()}-{os.getpid()}')
+    with pytest.raises(Exception,match='Profile'):BrowserManager.profile_guard(tmp_path)
+    assert (tmp_path/'SingletonLock').is_symlink()

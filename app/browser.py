@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import shutil
+import socket
 import subprocess
 import time
 from http.cookies import SimpleCookie
@@ -68,6 +69,29 @@ class BrowserManager:
         self.sessions = {}
         self.lock = asyncio.Lock()
         self.verification_locks = {}
+
+    @staticmethod
+    def profile_guard(profile):
+        """Serialize profile ownership and clear locks left by a stopped container."""
+        if os.name == 'nt':
+            return None
+        import fcntl
+        guard = (profile / '.art2api.lock').open('a')
+        try:
+            fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            chrome_lock = profile / 'SingletonLock'
+            if chrome_lock.is_symlink():
+                host, _, pid = os.readlink(chrome_lock).rpartition('-')
+                if host == socket.gethostname() and pid.isdigit() and Path('/proc', pid).exists():
+                    raise GatewayError('该账号浏览器 Profile 正被使用', 'browser_error')
+                # Only Chromium's three known singleton links, inside this
+                # exclusively owned profile. Never delete profile contents.
+                for name in ('SingletonLock', 'SingletonSocket', 'SingletonCookie'):
+                    (profile / name).unlink(missing_ok=True)
+            return guard
+        except Exception:
+            guard.close()
+            raise
 
     async def generation_verification(self, account_id):
         """Run the normal SDK; never create generations or solve challenges."""
@@ -147,8 +171,14 @@ class BrowserManager:
                 startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 startup.wShowWindow = subprocess.SW_HIDE
                 options['startupinfo'] = startup
-            process = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, **options)
-            self.sessions[account_id] = {'process': process, 'expires': time.time()+self.settings.browser_timeout, 'cdp': None}
+            guard = self.profile_guard(profile)
+            try:
+                process = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, **options)
+            except BaseException:
+                if guard:
+                    guard.close()
+                raise
+            self.sessions[account_id] = {'process': process, 'expires': time.time()+self.settings.browser_timeout, 'cdp': None, 'profile_guard': guard}
             try:
                 for _ in range(100):
                     if port_file.exists():
@@ -214,16 +244,20 @@ class BrowserManager:
         session = self.sessions.pop(account_id, None)
         if not session:
             return
-        if session.get('cdp'):
-            await session['cdp'].close()
-        process = session['process']
-        if process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), 10)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+        try:
+            if session.get('cdp'):
+                await session['cdp'].close()
+        finally:
+            process = session['process']
+            if process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), 10)
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await process.wait()
+            if session.get('profile_guard'):
+                session['profile_guard'].close()
 
     async def cleanup(self):
         for account_id, session in list(self.sessions.items()):
