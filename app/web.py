@@ -16,6 +16,7 @@ import httpx
 from jsonschema import Draft202012Validator, ValidationError
 
 from app.catalog import local_schema
+from app.cookies import parse_cookie_header
 from app.errors import GatewayError
 from app.network import client, public_media_url
 from app.web_catalog import GROUPS, generation_payload, generation_result, profiles, quote_input, validate_request
@@ -110,8 +111,7 @@ class WebClient:
             raise GatewayError('Artlist 网页返回了非 JSON 响应，请检查网页验证', 'web_protocol_error') from None
         # Persist rotated session cookies without exposing them in account responses.
         if response.headers.get_list('set-cookie'):
-            jar = SimpleCookie()
-            jar.load(secret['web_cookie'])
+            jar = parse_cookie_header(secret['web_cookie'])
             for value in response.headers.get_list('set-cookie'):
                 updates = SimpleCookie()
                 updates.load(value)
@@ -120,7 +120,7 @@ class WebClient:
                         jar.pop(name, None)
                     else:
                         jar[name] = morsel.value
-            self.db.update_credentials(self.account_id, {'web_cookie': '; '.join(f'{k}={v.value}' for k,v in jar.items())})
+            self.db.update_credentials(self.account_id, {'web_cookie': '; '.join(f'{k}={v}' for k,v in jar.items())})
         return body
 
     async def rpc(self, name, value=None, *, post=False):

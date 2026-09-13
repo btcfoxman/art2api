@@ -13,12 +13,12 @@ from app.config import Settings
 async def test_native_verification_blocks_paid_browser_request_and_forwards_actual_callback(sdk_result, expected):
     class DB:
         def account(self,*args):
-            return {'proxy_version':1,'credentials':{'web_cookie':'session=private'}}
+            return {'proxy_version':1,'credentials':{'web_cookie':'session=private','web_user_id':'user-1'}}
         def update_credentials(self,*args):pass
         def event(self,*args):pass
     manager = BrowserManager(DB(), Settings())
     cdp = AsyncMock()
-    cdp.evaluate.side_effect = [True, True, sdk_result, True]
+    cdp.evaluate.side_effect = [True, 'user-1', True, sdk_result, True]
     manager.open = AsyncMock()
     manager.page = AsyncMock(return_value=cdp)
     manager.session_credentials = AsyncMock(return_value={'cookie':'session=rotated','user_agent':'Browser'})

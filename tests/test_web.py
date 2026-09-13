@@ -166,6 +166,18 @@ async def test_http_web_protocol_preserves_proxy_and_does_not_log_session(setup)
     assert db.account(aid,True)['credentials']['web_cookie']=='session=rotated-private'
 
 
+@pytest.mark.asyncio
+async def test_cookie_rotation_keeps_login_after_json_consent_cookie(setup):
+    db,settings,aid=setup
+    cookie='CookieScriptConsent={"action":"accept"}; auth=private-login'
+    db.update_credentials(aid,{'web_cookie':cookie})
+    def factory(*args,**kwargs):
+        return httpx.AsyncClient(transport=httpx.MockTransport(lambda r:httpx.Response(200,json={'user':{}},headers={'set-cookie':'rotation=next; Path=/; Secure'})),**kwargs)
+    with patch('app.web.client',factory):
+        await WebClient(aid,db,settings).request('GET','/api/auth/session')
+    assert db.account(aid,True)['credentials']['web_cookie']==cookie+'; rotation=next'
+
+
 def test_trpc_explicit_rejection_is_not_a_generation_id():
     for body in [{'success':False},{'result':{'data':{'json':{'success':False}}}},{'error':{'message':'rejected'}}]:
         with pytest.raises(GatewayError) as exc:unwrap(body)

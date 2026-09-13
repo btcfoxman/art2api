@@ -8,13 +8,13 @@ import shutil
 import socket
 import subprocess
 import time
-from http.cookies import SimpleCookie
 from pathlib import Path
 
 import httpx
 from websockets.asyncio.client import connect
 
 from app.errors import GatewayError
+from app.cookies import browser_cookies
 from app.network import browser_proxy
 
 
@@ -105,12 +105,7 @@ class BrowserManager:
             # Static blocking avoids the paused-request retry/resume hazard.
             await cdp.call('Network.setBlockedURLs', {'urls': ['*createUserGeneration*']})
             await cdp.call('Network.clearBrowserCookies')
-            jar = SimpleCookie()
-            jar.load(secret.get('web_cookie', ''))
-            await cdp.call('Network.setCookies', {'cookies': [
-                {'name': name, 'value': item.value, 'url': 'https://toolkit.artlist.io/', 'secure': True}
-                for name, item in jar.items()
-            ]})
+            await cdp.call('Network.setCookies', {'cookies': browser_cookies(secret.get('web_cookie', ''))})
             await cdp.call('Page.navigate', {'url': 'https://toolkit.artlist.io/image-video-generator?mode=video'})
             for _ in range(60):
                 if await cdp.evaluate("location.origin === 'https://toolkit.artlist.io' && !!window.turnstile"):
@@ -118,6 +113,9 @@ class BrowserManager:
                 await asyncio.sleep(1)
             else:
                 raise GatewayError('后台网页验证脚本未就绪，请检查账号代理或登录', 'verification_unavailable', 503)
+            identity = await cdp.evaluate("fetch('/api/auth/session',{credentials:'include',cache:'no-store'}).then(r=>r.json()).then(s=>s.user?.id||null)")
+            if not identity or identity != secret.get('web_user_id'):
+                raise GatewayError('后台浏览器未保持原账号登录；已保留原会话，请重新导入登录', 'reauthorization_required', 401)
             await cdp.evaluate(Path(__file__).with_name('verification.js').read_text(encoding='utf-8'))
             try:
                 for _ in range(60):
