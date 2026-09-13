@@ -15,7 +15,7 @@
     'unsupported-callback': () => update({status: 'unsupported', code: 'unsupported-browser'}),
     'timeout-callback': () => update({status: 'timeout', code: 'challenge-timeout'}),
     'before-interactive-callback': () => update({status: 'interaction_required'}),
-    'expired-callback': () => update({status: 'timeout', code: 'token-expired'})
+    'expired-callback': () => update({status: 'waiting'})
   });
   return true;
 })()

@@ -21,7 +21,7 @@ class Settings:
     browser_headless: bool = field(default_factory=lambda: os.getenv('ART_BROWSER_HEADLESS', '0').lower() in {'1','true','yes'})
     browser_timeout: int = 900
     oauth_client_id: str = field(default_factory=lambda: os.getenv("ART_OAUTH_CLIENT_ID", ""))
-    version: str = "0.2.4"
+    version: str = "0.2.5"
 
     def validate(self):
         if len(self.api_key) < 24 or len(self.admin_token) < 24:

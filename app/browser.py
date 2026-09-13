@@ -158,8 +158,11 @@ class BrowserManager:
             profile = self.settings.data_dir / 'browser-profiles' / account_id
             profile.mkdir(parents=True, exist_ok=True)
             port_file = profile / 'DevToolsActivePort'
-            port_file.unlink(missing_ok=True)
-            args = [executable, '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
+            # Use a concrete native CDP port, as in the operator's Chrome launch.
+            with socket.socket() as listener:
+                listener.bind(('127.0.0.1', 0))
+                port = listener.getsockname()[1]
+            args = [executable, '--remote-debugging-address=127.0.0.1', '--remote-debugging-port='+str(port),
                     '--user-data-dir='+str(profile.resolve()), '--proxy-server='+proxy['server'],
                     '--proxy-bypass-list=<-loopback>', '--disable-quic', '--disable-dev-shm-usage',
                     '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--window-size=1100,760', 'about:blank']
@@ -176,6 +179,7 @@ class BrowserManager:
                 options['startupinfo'] = startup
             guard = self.profile_guard(profile)
             try:
+                port_file.unlink(missing_ok=True)
                 if os.name != 'nt' and not self.settings.browser_headless:
                     xvfb = shutil.which('Xvfb')
                     if not xvfb:
@@ -195,17 +199,23 @@ class BrowserManager:
                 raise
             self.sessions[account_id] = {'process': process, 'expires': time.time()+self.settings.browser_timeout, 'cdp': None, 'profile_guard': guard, 'display': display}
             try:
-                for _ in range(100):
-                    if port_file.exists():
-                        break
-                    if process.returncode is not None:
-                        raise GatewayError('账号浏览器启动失败', 'browser_error')
-                    await asyncio.sleep(.2)
-                port = int(port_file.read_text().splitlines()[0])
                 # Only localhost CDP traffic bypasses the account proxy.
-                async with httpx.AsyncClient(trust_env=False) as http:
-                    pages = (await http.get(f'http://127.0.0.1:{port}/json/list')).json()
-                page = next(p for p in pages if p.get('type') == 'page')
+                async with httpx.AsyncClient(trust_env=False, timeout=1) as http:
+                    for _ in range(100):
+                        if process.returncode is not None:
+                            raise GatewayError('账号浏览器启动失败', 'browser_error')
+                        try:
+                            response = await http.get(f'http://127.0.0.1:{port}/json/list')
+                            response.raise_for_status()
+                            page = next((p for p in response.json() if p.get('type') == 'page'), None)
+                            if page:
+                                break
+                        except (httpx.HTTPError, ValueError):
+                            pass
+                        await asyncio.sleep(.2)
+                    else:
+                        raise GatewayError('账号浏览器 CDP 页面启动超时', 'browser_error')
+                port_file.write_text(str(port)+'\n')
                 cdp = CDP(await connect(page['webSocketDebuggerUrl'], proxy=None, max_size=20_000_000))
                 self.sessions[account_id].update(cdp=cdp, port=port, target=page['id'])
                 await cdp.call('Page.enable')
@@ -261,16 +271,23 @@ class BrowserManager:
             return
         try:
             if session.get('cdp'):
+                try:
+                    await asyncio.wait_for(session['cdp'].call('Browser.close'), 3)
+                except Exception:
+                    pass  # A successful Browser.close may close the socket first.
                 await session['cdp'].close()
         finally:
             process = session['process']
             if process.returncode is None:
-                process.terminate()
                 try:
                     await asyncio.wait_for(process.wait(), 10)
                 except asyncio.TimeoutError:
-                    process.kill()
-                    await process.wait()
+                    process.terminate()
+                    try:
+                        await asyncio.wait_for(process.wait(), 5)
+                    except asyncio.TimeoutError:
+                        process.kill()
+                        await process.wait()
             if session.get('profile_guard'):
                 session['profile_guard'].close()
             display = session.get('display')

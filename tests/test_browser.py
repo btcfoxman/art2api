@@ -47,3 +47,21 @@ def test_stopped_container_profile_lock_is_removed_under_exclusive_guard(tmp_pat
     (tmp_path/'SingletonLock').symlink_to(f'{socket.gethostname()}-{os.getpid()}')
     with pytest.raises(Exception,match='Profile'):BrowserManager.profile_guard(tmp_path)
     assert (tmp_path/'SingletonLock').is_symlink()
+
+
+@pytest.mark.asyncio
+async def test_browser_close_flushes_profile_before_releasing_ownership():
+    events=[]
+    class CDP:
+        async def call(self, method):events.append(method)
+        async def close(self):events.append('socket_closed')
+    class Process:
+        returncode=None
+        async def wait(self):events.append('process_exited');self.returncode=0
+        def terminate(self):raise AssertionError('Normal close must flush profile gracefully')
+    class Guard:
+        def close(self):events.append('profile_released')
+    manager=BrowserManager(None, Settings())
+    manager.sessions['a']={'cdp':CDP(),'process':Process(),'profile_guard':Guard()}
+    await manager.close('a')
+    assert events == ['Browser.close','socket_closed','process_exited','profile_released']
