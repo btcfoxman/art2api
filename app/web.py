@@ -198,8 +198,9 @@ class WebClient:
                 if invalid:
                     bounds = '、'.join(filter(None, [f'短边至少 {lower}px' if lower else '', f'长边至多 {upper}px' if upper else '']))
                     raise ValueError(f'Artlist 图片尺寸不受支持：{"、".join(invalid)}；要求{bounds}')
-            for asset in values:
+            for index, asset in enumerate(values, 1):
                 meta=asset['metadata']
+                label = {'Image': '图片', 'Video': '视频', 'Audio': '音频'}[kind] + f' {index}'
                 limit=context.get('maxUploaded'+kind+'SizeMB')
                 if limit and meta['byteSize']>limit*1024*1024:
                     raise ValueError('Artlist 素材文件大小超限：'+field)
@@ -208,13 +209,14 @@ class WebClient:
                 extension = Path(meta.get('fileName', '')).suffix.lstrip('.').upper()
                 extension = {'JPEG':'JPG', 'M4A':'MP4', 'WAVE':'WAV'}.get(extension, extension)
                 if formats and extension and extension not in formats:
-                    raise ValueError('Artlist 素材格式不受支持：'+field)
+                    raise ValueError(f'Artlist 素材格式不受支持：{label} 为 {extension}；允许 {"、".join(formats)}')
                 if kind == 'Video' and meta.get('fps'):
                     if (context.get('minVideoFps') and meta['fps']<context['minVideoFps']) or (context.get('maxVideoFps') and meta['fps']>context['maxVideoFps']):
                         raise ValueError('Artlist 参考视频帧率不受支持')
                 for key, compare in [('minUploaded'+kind+'Duration', lambda n: duration<n), ('maxUploaded'+kind+'Duration', lambda n: duration>n)]:
                     if context.get(key) and compare(context[key]):
-                        raise ValueError('Artlist 素材时长不受支持：'+field)
+                        bound = '至少' if key.startswith('min') else '最多'
+                        raise ValueError(f'Artlist 素材时长不受支持：{label} 为 {duration:g} 秒，要求{bound} {context[key]:g} 秒')
             total=sum(a['metadata'].get('durationMs',0)/1000 for a in values)
             limit=context.get('maxTotal'+kind+'Duration') or context.get('total'+kind+'InputDuration')
             if limit and total>limit:
@@ -236,7 +238,7 @@ class WebClient:
                         continue
                     if response.status_code >= 400:
                         raise ValueError('参考素材下载失败')
-                    mime = response.headers.get('content-type','').split(';')[0]
+                    mime = response.headers.get('content-type','').split(';')[0].strip().lower()
                     if not mime.startswith(kind+'/'):
                         mime = mimetypes.guess_type(urlsplit(url).path)[0] or ''
                     if not mime.startswith(kind+'/'):
@@ -249,7 +251,16 @@ class WebClient:
                     break
             else:
                 raise ValueError('参考素材重定向次数过多')
-            suffix = mimetypes.guess_extension(mime) or '.bin'
+            # Linux mime databases often know audio/x-wav but omit audio/wav.
+            # Wire filenames must be stable across the developer OS and Docker.
+            suffix = {
+                'image/jpeg': '.jpg', 'image/jpg': '.jpg', 'image/png': '.png',
+                'image/gif': '.gif', 'image/webp': '.webp',
+                'video/mp4': '.mp4', 'video/quicktime': '.mov',
+                'audio/wav': '.wav', 'audio/x-wav': '.wav', 'audio/wave': '.wav',
+                'audio/vnd.wave': '.wav', 'audio/mpeg': '.mp3', 'audio/mp3': '.mp3',
+                'audio/x-mp3': '.mp3', 'audio/mp4': '.m4a', 'audio/x-m4a': '.m4a',
+            }.get(mime) or mimetypes.guess_extension(mime) or '.bin'
             filename = uuid.uuid4().hex+suffix
             metadata = {'mimeType': mime, 'fileName': filename, 'byteSize': len(content)}
             processing = None

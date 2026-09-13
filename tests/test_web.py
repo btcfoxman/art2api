@@ -136,8 +136,11 @@ def test_captured_completed_response_and_pending_output_are_distinct():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('kind', ['image', 'video', 'audio'])
-async def test_uploaded_media_uses_separate_get_signature_and_checks_readability(setup, kind):
+@pytest.mark.parametrize('kind,mime,extension', [
+    ('image','image/png','.png'), ('video','video/mp4','.mp4'), ('audio','audio/mpeg','.mp3'),
+    ('audio','audio/wav','.wav'), ('audio','audio/x-wav','.wav'), ('audio','Audio/WAV; charset=binary','.wav'),
+])
+async def test_uploaded_media_uses_separate_get_signature_and_checks_readability(setup, kind, mime, extension):
     db,settings,aid=setup
     source='https://media.example/reference'
     stored='https://artlist-prod-ai-toolkit-custom-user-uploads.s3.eu-central-1.amazonaws.com/object'
@@ -150,6 +153,7 @@ async def test_uploaded_media_uses_separate_get_signature_and_checks_readability
             name=request.url.path.rsplit('/',1)[-1]
             payload=json.loads(request.content)['json']
             if name=='uploadRouter.getPresignedUrl':
+                assert payload['fileName'].endswith(extension)
                 data={'presignedUrl':write_url,'fileUrl':stored,'fileKey':'object'}
             else:
                 assert name=='uploadRouter.getPresignedUrlFromKey'
@@ -159,7 +163,7 @@ async def test_uploaded_media_uses_separate_get_signature_and_checks_readability
             return httpx.Response(200,json={'result':{'data':{'json':data}}})
         assert 'cookie' not in request.headers and 'authorization' not in request.headers
         if str(request.url)==source:
-            return httpx.Response(200,content=b'media',headers={'content-type':kind+('/png' if kind=='image' else '/mp4' if kind=='video' else '/mpeg')})
+            return httpx.Response(200,content=b'media',headers={'content-type':mime})
         if request.method=='PUT':
             assert str(request.url)==write_url and request.content==b'media'
             return httpx.Response(200)
@@ -173,14 +177,30 @@ async def test_uploaded_media_uses_separate_get_signature_and_checks_readability
     probe.returncode=0
     probe.communicate.return_value=(json.dumps({'streams':[{'codec_type':'video','width':1280,'height':720,'avg_frame_rate':'24/1'}],
                                                'format':{'duration':'4.0'}}).encode(),b'')
-    with patch('app.web.client',factory),patch('app.web.asyncio.create_subprocess_exec',AsyncMock(return_value=probe)):
+    # Reproduce the Docker MIME database that does not register audio/wav.
+    with patch('app.web.client',factory),patch('app.web.asyncio.create_subprocess_exec',AsyncMock(return_value=probe)),patch('app.web.mimetypes.guess_extension',return_value=None):
         asset=await WebClient(aid,db,settings).upload(source,kind)
     assert asset['file_url']==read_url
+    assert asset['metadata']['fileName'].endswith(extension)
+    if kind=='audio':
+        WebClient.validate_media({'audio_urls':[asset]}, {'audioFormats':['WAV','MP3'],'minUploadedAudioDuration':4})
     request=normalize_request({'model':MODEL,'prompt':'reference test','duration':4})
     _,inputs,settings,artifacts=quote_input(request,{kind+'_urls':[asset]})
     assert inputs[kind+'_urls'][0]['fileUrl']==read_url
     assert artifacts[0]['metadata']['fileUrl']==read_url
     assert parse_qs(read_url.split('?',1)[1])['x-id']==['GetObject']
+
+
+def test_valid_wav_extension_does_not_bypass_duration_or_format_limits():
+    asset={'metadata':{'fileName':'reference.wav','mimeType':'audio/wav','byteSize':123558,'durationMs':2800}}
+    context={'audioFormats':['WAV','MP3'],'minUploadedAudioDuration':4}
+    with pytest.raises(ValueError,match='音频 1 为 2.8 秒，要求至少 4 秒'):
+        WebClient.validate_media({'audio_urls':[asset]},context)
+    asset['metadata']['durationMs']=4000
+    WebClient.validate_media({'audio_urls':[asset]},context)
+    asset['metadata']['fileName']='unsupported.aac'
+    with pytest.raises(ValueError,match='音频 1 为 AAC；允许 WAV、MP3'):
+        WebClient.validate_media({'audio_urls':[asset]},context)
 
 
 @pytest.mark.asyncio
