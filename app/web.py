@@ -130,7 +130,7 @@ class WebClient:
         self.proxy_version = self.db.account(account_id)['proxy_version']
         self.http = None
         self.media_http = None
-        self.media_slots = asyncio.Semaphore(3)
+        self.media_slots = asyncio.Semaphore(12)
         self.model_lock = asyncio.Lock()
         self.model_cache = {}
 
@@ -143,8 +143,8 @@ class WebClient:
         if http is None:
             http = client(account['credentials']['proxy_url'], self.settings.request_timeout,
                           cookies=CookieJar(policy=NoStoredCookies()),
-                          limits=httpx.Limits(max_connections=3 if media else 1,
-                                             max_keepalive_connections=3 if media else 1,
+                          limits=httpx.Limits(max_connections=12 if media else 1,
+                                             max_keepalive_connections=12 if media else 1,
                                              keepalive_expiry=60))
             setattr(self, attr, http)
         return http
@@ -549,7 +549,9 @@ class WebClient:
                 'action': '前置已使用的引用标签，长编号优先映射；保留完整原文和素材序号',
             }})
         assets={}
+        task_slots = asyncio.Semaphore(3)
         timing['media_parallelism'] = 3
+        timing['media_account_parallelism'] = 12
         timing['media_items'] = []
         def save_processing():
             records = [{**asset['processing'], 'field': key, 'index': index+1}
@@ -559,8 +561,14 @@ class WebClient:
         async def upload_reference(field, index, url, kind, options, record):
             context = media_context.set(record)
             try:
-                assets[field][index] = await self.upload(url, kind, **options)
+                with measure(record, 'task_queue_seconds'):
+                    await task_slots.acquire()
+                try:
+                    assets[field][index] = await self.upload(url, kind, **options)
+                finally:
+                    task_slots.release()
             finally:
+                record['total_seconds'] = round(record.get('total_seconds', 0) + record.get('task_queue_seconds', 0), 3)
                 media_context.reset(context)
                 save_processing()
         def schedule_upload(field, index, url, kind, options):

@@ -77,31 +77,50 @@ async def test_changed_proxy_never_reuses_old_pool(setup):
 async def test_parallel_assets_preserve_reference_order_and_share_account_limit(setup):
     db, settings, aid = setup
     web = WebClient(aid, db, settings)
-    db.save_account({'max_concurrency': 2}, aid)
+    db.save_account({'max_concurrency': 5}, aid)
     request = normalize_request({'model': MODEL, 'prompt': 'test',
                                  'image_urls': [f'https://media.example/{i}.png' for i in range(4)]})
-    tasks = [db.create_task(request, [(aid, profiles()[MODEL])], str(i), 100)[0] for i in range(2)]
+    tasks = [db.create_task(request, [(aid, profiles()[MODEL])], str(i), 100)[0] for i in range(5)]
     active, peak = 0, 0
-    three_started = asyncio.Event()
+    full_pool = asyncio.Event()
+    per_task, task_peak = {}, {}
 
     async def upload(url, kind, record, **options):
         nonlocal active, peak
         active += 1
         peak = max(peak, active)
-        if active == 3:
-            three_started.set()
+        task_id = asyncio.current_task().get_name().split(':')[0]
+        per_task[task_id] = per_task.get(task_id, 0) + 1
+        task_peak[task_id] = max(task_peak.get(task_id, 0), per_task[task_id])
+        if active == 12:
+            full_pool.set()
         try:
-            await asyncio.wait_for(three_started.wait(), 1)
+            await asyncio.wait_for(full_pool.wait(), 1)
             # Intentionally finish in a different order from the request.
             await asyncio.sleep((4-int(url.rsplit('/', 1)[-1][0]))*.005)
             return {'file_url': url, 'metadata': {}}
         finally:
             active -= 1
+            per_task[task_id] -= 1
 
     web._upload = upload
-    timings = [{}, {}]
-    assets = await asyncio.gather(*(web._prepare_media(task, timing) for task, timing in zip(tasks, timings)))
-    assert peak == 3 and active == 0
+    timings = [{} for _ in tasks]
+    # Tag child coroutines with their logical request to count per-task slots.
+    original_upload = web.upload
+    async def tagged_upload(*args, **kwargs):
+        timing = preparation_context.get()
+        asyncio.current_task().set_name(str(id(timing))+':media')
+        return await original_upload(*args, **kwargs)
+    web.upload = tagged_upload
+    async def prepare(task, timing):
+        context = preparation_context.set(timing)
+        try:
+            return await web._prepare_media(task, timing)
+        finally:
+            preparation_context.reset(context)
+    assets = await asyncio.gather(*(prepare(task, timing) for task, timing in zip(tasks, timings)))
+    assert peak == 12 and active == 0
+    assert all(value <= 3 for value in task_peak.values())
     for result, timing in zip(assets, timings):
         assert [a['file_url'] for a in result['image_urls']] == request['image_urls']
         assert [r['index'] for r in timing['media_items']] == [1, 2, 3, 4]
@@ -132,14 +151,14 @@ async def test_media_failure_or_cancellation_drains_siblings_and_releases_slots(
             completed += 1
 
     web._upload = upload
-    parent = asyncio.create_task(web.parallel_uploads([web.upload(f'https://media.example/{i}', 'image') for i in range(5)]))
+    parent = asyncio.create_task(web.parallel_uploads([web.upload(f'https://media.example/{i}', 'image') for i in range(15)]))
     await asyncio.wait_for(started.wait(), 1)
     if cancel_parent:
         parent.cancel()
     with pytest.raises(asyncio.CancelledError if cancel_parent else ValueError):
         await asyncio.wait_for(parent, 1)
     assert active == 0 and completed >= 3
-    for _ in range(3):
+    for _ in range(12):
         await asyncio.wait_for(web.media_slots.acquire(), .2)
     assert media_context.get() is None
 
