@@ -10,6 +10,7 @@ from app.config import Settings
 from app.db import Database
 from app.errors import GatewayError
 from app.service import Service
+from app.public_errors import GENERATION_FAILED, public_error
 from app.web import WebClient, web_task_context
 from app.web_catalog import profiles
 
@@ -132,6 +133,36 @@ async def test_retry_stops_when_proxy_binding_changes(setup):
             await WebClient(aid, db, settings).rpc('modelRouter.getModel', {})
     assert error.value.code == 'proxy_binding_changed'
     assert proxies == ['socks5://xray:20001']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('missing_team_id', [True, False])
+async def test_bad_request_diagnostics_identify_endpoint_without_echoing_upstream_data(setup, missing_team_id):
+    db, settings, aid = setup
+    secret = 'private-cookie signed-url-secret'
+    message = json.dumps([{'code': 'invalid_type', 'expected': 'string', 'received': 'undefined',
+                           'path': ['teamId'], 'message': secret}]) if missing_team_id else secret
+    proxies = []
+    token = web_task_context.set('task-http400')
+    try:
+        with patch('app.web.client', factory_for(lambda request: httpx.Response(400, json={'error': {'json': {'message': message}}}), proxies)), patch('app.web.asyncio.sleep', new_callable=AsyncMock) as sleep:
+            with pytest.raises(GatewayError) as error:
+                await WebClient(aid, db, settings).rpc('chatSession.createChatSession', {'name': 'sample'}, post=True)
+        sleep.assert_not_awaited()
+    finally:
+        web_task_context.reset(token)
+    assert len(proxies) == 1
+    assert error.value.code == 'generation_rejected'
+    assert 'chatSession.createChatSession' in str(error.value)
+    assert ('MISSING_SESSION_TEAM_ID' if missing_team_id else 'upstream_bad_request') in str(error.value)
+    assert 'private-cookie' not in str(error.value) and 'signed-url-secret' not in str(error.value)
+    diagnostic = db.account(aid, True)['credentials']['web_last_rejection']
+    assert diagnostic['status'] == 400 and diagnostic['task_id'] == 'task-http400'
+    assert diagnostic['procedure'] == 'chatSession.createChatSession'
+    assert secret in diagnostic['body']
+    assert 'signed-url-secret' not in db.conn.execute('SELECT secret FROM accounts WHERE id=?', (aid,)).fetchone()[0]
+    assert 'signed-url-secret' not in json.dumps(db.account(aid)) + json.dumps(db.events())
+    assert public_error(error.value.code, str(error.value))['message'] == GENERATION_FAILED
 
 
 @pytest.mark.asyncio

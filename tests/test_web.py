@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from uuid import UUID
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs
@@ -541,6 +542,8 @@ async def test_compatible_api_submits_signed_web_task_and_returns_video(tmp_path
     def rpc_response(name,*args,**kwargs):
         if name == 'modelRouter.getCostQuote' and with_verification != 'provided':
             service.browsers.generation_verification.assert_awaited_once_with(aid)
+        if name == 'chatSession.createChatSession':
+            assert UUID(args[0]['teamId']).version == 4
         return responses[name]
     web.rpc=AsyncMock(side_effect=rpc_response)
     try:
@@ -589,6 +592,40 @@ async def test_forbidden_diagnostics_never_expose_arbitrary_upstream_data(setup)
     assert error.value.code == 'generation_rejected'
     assert 'TURNSTILE_VERIFICATION_FAILED' in str(error.value)
     assert 'private-cookie' not in str(error.value) and 'secret-signature' not in str(error.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('configured', ['', '   ', 'legacy-session-team-id'])
+async def test_new_chat_sessions_always_supply_required_team_id(setup, configured):
+    db, settings, aid = setup
+    db.update_credentials(aid, {'web_team_id': configured})
+    db.save_account({'max_concurrency': 2}, aid)
+    web = WebClient(aid, db, settings)
+    web.quote = AsyncMock(return_value=({'modelId': 3009, 'cost': 1, 'modelFeature': 'text-to-video',
+                                        'digitalSignature': 'signature', 'timestamp': 123}, {}, {}, []))
+    inputs = []
+    async def rpc(name, value, **kwargs):
+        if name == 'userGenerationRouter.checkGenerationEligibility':
+            return {}
+        assert name == 'chatSession.createChatSession' and kwargs == {'post': True}
+        # Reproduce the observed provider schema: an omitted teamId is HTTP 400.
+        assert isinstance(value.get('teamId'), str) and value['teamId'].strip()
+        inputs.append(value)
+        return {'id': 'chat-' + str(len(inputs))}
+    web.rpc = AsyncMock(side_effect=rpc)
+    request = normalize_request({'model': MODEL, 'prompt': 'test'})
+    for i in range(2):
+        task, _ = db.create_task(request, [(aid, profiles()[MODEL])], str(i), 100)
+        prepared = await web.prepare(task)
+        assert prepared['chatSessionId'] == 'chat-' + str(i + 1)
+        assert db.task(task['id'])['result']['preparation_timing']['stage'] == 'ready'
+    assert all('ART2API art_' in item['name'] for item in inputs)
+    if configured.strip():
+        assert [item['teamId'] for item in inputs] == [configured] * 2
+    else:
+        assert len({item['teamId'] for item in inputs}) == 2
+        assert all(UUID(item['teamId']).version == 4 for item in inputs)
+        assert db.account(aid, True)['credentials']['web_team_id'] == configured
 
 
 @pytest.mark.asyncio

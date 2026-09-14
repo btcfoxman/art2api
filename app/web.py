@@ -54,17 +54,27 @@ web_task_context = ContextVar('web_task_context', default=None)
 
 def rejection_reason(response):
     """Expose recognized public error codes, never arbitrary upstream text."""
+    fallback = 'upstream_bad_request' if response.status_code == 400 else 'upstream_forbidden'
     try:
         error = response.json().get('error', {})
         error = error.get('json', error)
         message = str(error.get('message', ''))
+        if response.status_code == 400:
+            try:
+                issues = json.loads(message)
+            except (ValueError, TypeError):
+                issues = []
+            if isinstance(issues, list) and any(isinstance(issue, dict) and
+                    issue.get('path') == ['teamId'] and issue.get('code') == 'invalid_type' and
+                    issue.get('received') == 'undefined' for issue in issues):
+                return 'MISSING_SESSION_TEAM_ID'
         for code in ('TURNSTILE_VERIFICATION_FAILED', 'FREE_TIER_GENERATION_BLOCKED',
                      'INSUFFICIENT_CREDITS', 'UNAUTHORIZED', 'FORBIDDEN'):
             if code in message:
                 return code
-        return 'upstream_forbidden'
+        return fallback
     except (ValueError, AttributeError):
-        return 'upstream_forbidden'
+        return fallback
 
 
 def unwrap(body):
@@ -138,14 +148,16 @@ class WebClient:
         if response.status_code == 401:
             self.db.update_account(self.account_id, enabled=False, status='unauthorized', last_error='网页登录已失效，请重新登录')
             raise GatewayError('Artlist 网页登录已失效', 'reauthorization_required', 401)
-        if response.status_code == 403:
+        if response.status_code in {400, 403}:
             self.db.update_credentials(self.account_id, {'web_last_rejection': {
-                'procedure': path.rsplit('/',1)[-1], 'status': 403,
+                'procedure': path.rsplit('/',1)[-1], 'status': response.status_code,
+                'task_id': web_task_context.get(), 'received_at': time.time(),
                 'content_type': response.headers.get('content-type', ''), 'body': response.text[:16000],
             }})
             reason = rejection_reason(response)
-            message = f'Artlist 拒绝网页协议请求（HTTP 403，{reason}，{path.rsplit("/",1)[-1]}）'
+            message = f'Artlist 拒绝网页协议请求（HTTP {response.status_code}，{reason}，{path.rsplit("/",1)[-1]}）'
             self.db.update_account(self.account_id, last_error=message)
+            self.db.event('web_request_rejected', message, self.account_id, web_task_context.get())
             raise GatewayError(message, 'generation_rejected', 422)
         if response.status_code >= 500:
             raise GatewayError('Artlist 网页上游服务异常', 'web_upstream_error', 502, retryable=True)
@@ -450,9 +462,10 @@ class WebClient:
         self.db.update_credentials(self.account_id, {'web_last_preflight': {'eligibility': eligibility, 'model_id': quote['modelId']}})
         if eligibility.get('isFairUseExceeded') or eligibility.get('isConcurrencyExceeded'):
             raise GatewayError('Artlist 额度或并发不可用', 'generation_rejected', 422)
-        session_input={'name':'ART2API '+task['id']}
-        if self.secret().get('web_team_id'):
-            session_input['teamId']=self.secret()['web_team_id']
+        # The captured web client supplies crypto.randomUUID() for each new
+        # chat session. This required field is not an account membership lookup.
+        session_input={'name':'ART2API '+task['id'],
+                       'teamId':(self.secret().get('web_team_id') or '').strip() or str(uuid.uuid4())}
         session=await self.rpc('chatSession.createChatSession',session_input,post=True)
         if not session.get('id'):
             raise GatewayError('Artlist 未返回会话 ID', 'web_protocol_error')

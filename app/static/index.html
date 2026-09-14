@@ -46,7 +46,7 @@
 <dialog id="webSessionDialog" class="large-dialog"><form class="dialog-form" id="webSessionForm">
 <header><div><p class="eyebrow">WEB SESSION</p><h2>网页登录设置</h2></div><button type="button" class="close">关闭</button></header>
 <p class="notice">登录与生成使用该账号的固定代理。可在连接账号窗口完成登录并保存，也可导入自己的网页登录会话。会话和验证令牌加密保存。</p>
-<details><summary>手动导入网页登录会话</summary><label>Cookie<textarea name="cookie" rows="3" autocomplete="off" spellcheck="false"></textarea></label><label>User-Agent<input name="user_agent" autocomplete="off"></label><label>团队 ID（可选）<input name="team_id" autocomplete="off"></label></details>
+<details><summary>手动导入网页登录会话</summary><label>Cookie<textarea name="cookie" rows="3" autocomplete="off" spellcheck="false"></textarea></label><label>User-Agent<input name="user_agent" autocomplete="off"></label><label>会话 teamId（可选，留空自动生成）<input name="team_id" autocomplete="off"></label></details>
 <label>当次网页验证令牌（可选）<input type="password" name="token" autocomplete="new-password" maxlength="16000"></label>
 <p class="notice">仅接受本人正常网页验证取得的未使用令牌，登记后最多保留 4 分钟，并且只用于一个任务。未配置时直接按网页登录协议提交，由上游校验是否接受。</p>
 <footer><button type="button" class="close">取消</button><button type="submit" class="primary">保存</button></footer></form></dialog>
