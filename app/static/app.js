@@ -1,5 +1,5 @@
 const $ = selector => document.querySelector(selector);
-const state = {accounts: [], tasks: [], settings: {}, overview: {}, page: 0, accountFilter: 'enabled', browserAccount: null, profileAccount: null, webAccount: null};
+const state = {accounts: [], tasks: [], settings: {}, overview: {}, page: 0, clearingTasks: false, accountFilter: 'enabled', browserAccount: null, profileAccount: null, webAccount: null};
 const taskLimits = [20, 50, 100, 200, 500];
 function preference(key, choices, fallback) { try { const value = localStorage.getItem('art2api.' + key); return value !== null && choices.includes(Number(value)) ? Number(value) : fallback; } catch { return fallback; } }
 function savePreference(key, value) { try { localStorage.setItem('art2api.' + key, String(value)); return true; } catch { return false; } }
@@ -86,6 +86,10 @@ function taskRow(task) {
     <td>${badge(task.internal_status)}</td><td><div class="progress-stack"><span class="progress-value" title="按任务状态展示的阶段进度"><b class="mono">${progress}%</b><span class="progress-track"><i style="width:${progress}%"></i></span></span><span class="elapsed">${terminal ? '耗时' : '已用'} ${durationText(task)}</span></div></td>
     <td><span class="time-stack"><span>创建 ${esc(stamp(task.created_at))}</span><span>更新 ${esc(stamp(task.updated_at))}</span></span></td><td>${result}${task.internal_status === 'submission_unknown' ? `<button data-recover="${esc(task.id)}">恢复查询</button>` : ''}</td></tr>`;
 }
+function syncClearTasksButton() {
+  $('#clearTasks').disabled = state.clearingTasks || !(state.overview.succeeded + state.overview.failed);
+  $('#clearTasks').setAttribute('aria-busy', String(state.clearingTasks));
+}
 function renderTasks() {
   $('#tasks').innerHTML = state.tasks.map(taskRow).join(''); $('#tasksEmpty').hidden = state.tasks.length > 0;
   const total = state.overview.total || 0, pages = Math.max(1, Math.ceil(total/state.taskLimit));
@@ -93,6 +97,7 @@ function renderTasks() {
   $('#pageInfo').textContent = `第 ${state.page+1} / ${pages} 页`;
   $('#previousPage').disabled = state.page === 0; $('#nextPage').disabled = (state.page+1)*state.taskLimit >= total;
   $('#taskLimit').value = String(state.taskLimit);
+  syncClearTasksButton();
 }
 async function refresh() {
   const sequence = ++refreshSequence, page = state.page, limit = state.taskLimit;
@@ -131,6 +136,20 @@ $('#taskLimit').onchange = () => { state.taskLimit = Number($('#taskLimit').valu
 $('#previousPage').onclick = () => { if (state.page > 0) { state.page--; refresh().catch(error => toast(error.message)); } };
 $('#nextPage').onclick = () => { if ((state.page+1)*state.taskLimit < state.overview.total) { state.page++; refresh().catch(error => toast(error.message)); } };
 $('#tasksRefresh').onclick = event => busy(event.currentTarget, refresh);
+$('#clearTasks').onclick = async () => {
+  if ($('#clearTasks').disabled || state.clearingTasks) return;
+  if (!confirm('清空所有分页中已完成或失败的任务？进行中和结果未知的任务会保留，历史任务仍可按 ID 查询。')) return;
+  state.clearingTasks = true; busyCount++; refreshSequence++; syncClearTasksButton();
+  try {
+    const result = await api('/api/tasks/completed', {method:'DELETE'});
+    closeMediaPreview();
+    state.page = 0;
+    try { await refresh(); }
+    catch { toast(`已清空 ${result.cleared} 条任务，但列表刷新失败，请点击刷新。`); return; }
+    toast(`已清空 ${result.cleared} 条已完成或失败的任务`);
+  } catch (error) { toast(error.message); }
+  finally { state.clearingTasks = false; busyCount--; syncClearTasksButton(); }
+};
 const runtimeFields = ['queue_limit','task_timeout_seconds','poll_interval_seconds','request_timeout_seconds','browser_timeout_seconds','browser_headless','sd25_video_policy'];
 let settingsBaseline = {};
 $('#settingsButton').onclick = event => busy(event.currentTarget, async () => {

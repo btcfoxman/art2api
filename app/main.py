@@ -338,6 +338,10 @@ def create_app(settings=None):
     async def overview():
         return db.task_summary()
 
+    @app.delete('/api/tasks/completed', dependencies=[Depends(admin)])
+    async def clear_completed_tasks():
+        return {'cleared': db.clear_completed_tasks()}
+
     @app.post('/api/tasks', dependencies=[Depends(admin)])
     async def test_task(request: Request):
         return await service.create(await request.json(), request.headers.get('Idempotency-Key', ''))

@@ -70,6 +70,8 @@ class Database:
         columns = {row[1] for row in self.conn.execute('PRAGMA table_info(tasks)')}
         if 'query_deadline' not in columns:
             self.conn.execute('ALTER TABLE tasks ADD COLUMN query_deadline REAL NOT NULL DEFAULT 0')
+        if 'cleared_at' not in columns:
+            self.conn.execute('ALTER TABLE tasks ADD COLUMN cleared_at REAL NOT NULL DEFAULT 0')
 
     @contextmanager
     def transaction(self):
@@ -224,15 +226,24 @@ class Database:
                 marks = ','.join('?' for _ in ACTIVE)
                 rows = self.conn.execute(f"SELECT id FROM tasks WHERE status IN ({marks}) ORDER BY created_at", ACTIVE).fetchall()
             else:
-                rows = self.conn.execute("SELECT id FROM tasks ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", (limit, offset)).fetchall()
+                rows = self.conn.execute("SELECT id FROM tasks WHERE cleared_at=0 OR status NOT IN ('succeeded','failed') ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", (limit, offset)).fetchall()
             return [self.task(row['id']) for row in rows]
 
     def task_summary(self):
         with self.lock:
-            counts = {row['status']: row['n'] for row in self.conn.execute('SELECT status, COUNT(*) AS n FROM tasks GROUP BY status')}
+            counts = {row['status']: row['n'] for row in self.conn.execute("SELECT status, COUNT(*) AS n FROM tasks WHERE cleared_at=0 OR status NOT IN ('succeeded','failed') GROUP BY status")}
             return {'total': sum(counts.values()), 'active': sum(counts.get(s, 0) for s in ACTIVE),
                     'succeeded': counts.get('succeeded', 0), 'failed': counts.get('failed', 0),
                     'unknown': counts.get('submission_unknown', 0)}
+
+    def clear_completed_tasks(self):
+        # Retain task IDs, results and idempotency keys for channel queries/retries.
+        # A positive status allowlist also protects unknown and future task states.
+        with self.transaction() as con:
+            count = con.execute("UPDATE tasks SET cleared_at=? WHERE cleared_at=0 AND status IN ('succeeded','failed')", (time.time(),)).rowcount
+            if count:
+                self.event('tasks_cleared', f'已从最近任务列表清空 {count} 条已完成或失败的任务')
+            return count
 
     def runtime_settings(self):
         with self.lock:

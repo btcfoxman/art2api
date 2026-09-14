@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>ART2API Console</title><link rel="stylesheet" href="/static/styles.css?v=0.3.3"><script src="/static/app.js?v=0.3.10" defer></script></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>ART2API Console</title><link rel="stylesheet" href="/static/styles.css?v=0.3.3"><script src="/static/app.js?v=0.3.16" defer></script></head>
 <body><main class="shell">
   <header class="mast">
     <div class="brand"><span class="brand-mark">AR</span><div><p>ARTLIST PROTOCOL GATEWAY</p><h1>ART2API <span>Console</span></h1></div></div>
@@ -26,7 +26,7 @@
     <div class="table-wrap accounts-wrap"><table class="account-table"><thead><tr><th>账号 / 接入</th><th>状态 / 授权</th><th>并发</th><th>模型</th><th>固定代理 / 出口</th><th>最近检测</th><th class="actions-col">操作</th></tr></thead><tbody id="accounts"></tbody></table><div class="empty" id="accountsEmpty" hidden><span data-icon="users"></span><span id="accountsEmptyText">暂无启用账号</span><button id="emptyAdd">添加账号</button></div></div>
   </section>
   <section class="workspace">
-    <div class="section-head"><div class="title-row"><h2>最近任务</h2><span class="caption" id="taskCount">—</span></div><div class="section-actions"><label class="inline-label" for="taskLimit">每页</label><select id="taskLimit" aria-label="每页任务条数"><option value="20">20 条</option><option value="50">50 条</option><option value="100">100 条</option><option value="200">200 条</option><option value="500">500 条</option></select><button class="icon-button" id="tasksRefresh" title="刷新任务" aria-label="刷新任务"><span data-icon="refresh"></span></button></div></div>
+    <div class="section-head"><div class="title-row"><h2>最近任务</h2><span class="caption" id="taskCount">—</span></div><div class="section-actions"><label class="inline-label" for="taskLimit">每页</label><select id="taskLimit" aria-label="每页任务条数"><option value="20">20 条</option><option value="50">50 条</option><option value="100">100 条</option><option value="200">200 条</option><option value="500">500 条</option></select><button class="icon-button" id="tasksRefresh" title="刷新任务" aria-label="刷新任务"><span data-icon="refresh"></span></button><button class="danger" id="clearTasks" title="清空所有分页中已完成或失败的任务，保留进行中和结果未知的任务" disabled><span data-icon="trash"></span>清空</button></div></div>
     <div class="table-wrap tasks-wrap"><table class="task-table"><thead><tr><th>任务 / 账号</th><th>模型参数 / 提示词 / 素材</th><th>状态</th><th>进度 / 耗时</th><th>创建 / 更新时间</th><th class="result-col">结果</th></tr></thead><tbody id="tasks"></tbody></table><div class="empty" id="tasksEmpty" hidden><span data-icon="layers"></span><span>暂无生成任务</span></div></div>
     <div class="pagination"><span class="caption">生成与查询固定使用原账号和代理</span><div><button id="previousPage" aria-label="上一页"><span data-icon="left"></span></button><span id="pageInfo">第 1 页</span><button id="nextPage" aria-label="下一页"><span data-icon="right"></span></button></div></div>
   </section>

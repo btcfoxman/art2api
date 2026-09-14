@@ -14,6 +14,7 @@
 | POST | `/api/accounts/{id}/web-verification` | 管理端登记一次性验证令牌 |
 | POST | `/api/accounts/{id}/web-quote` | 管理端无素材报价检测，不生成 |
 | GET | `/api/accounts/{id}/web-tasks/{generation_id}` | 管理端查询已有网页任务与输出 |
+| DELETE | `/api/tasks/completed` | 管理端清空最近任务列表中所有已成功或已失败的任务；保留进行中和结果未知任务 |
 
 ```json
 {"model":"sd-2-5-480p","prompt":"海边日出，镜头缓慢推进","duration":5,"aspect_ratio":"16:9","image_urls":[],"video_urls":[],"audio_urls":[],"generate_audio":true}
@@ -24,3 +25,5 @@
 网页任务先用 generation ID 查询 `getUserGenerationById`，再用 output ID 查询 `getUserGenerationOutputById`，核对两者关联后返回视频地址。进程重启恢复原任务查询。提交中断或接受情况不明时标记 `submission_unknown`，阻止重复扣费与自动 fallback；管理员可补充真实 generation ID 恢复查询。完成状态暂时没有输出时继续查询，低于请求分辨率的输出不作为成功结果返回。
 
 当前使用单个 Uvicorn 进程，不支持多个进程共同调度同一 SQLite 数据库。
+
+清空操作需要管理登录会话及 `X-Requested-With: art2api`，返回清理条数（如 `{"cleared":12}`），覆盖所有分页。清空后历史任务仍可按 ID 查询，幂等记录保持有效，不会因清空而重复生成。
