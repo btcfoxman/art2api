@@ -6,6 +6,8 @@
 
 `pre` 分支推送触发 `.github/workflows/deploy-test.yml`：测试 → 构建并推送 GHCR 镜像 → `art2api-pre` 专用 runner 部署 → 检查 cloudflared 和公开 HTTPS。
 
+代码仓库公开于 <https://github.com/btcfoxman/art2api>。构建与测试使用 GitHub 托管的 `ubuntu-latest` runner，部署使用预发布服务器上的专用 runner；workflow 仅接受 `pre` 分支推送或手动触发，没有外部 PR 部署入口。`.env.example` 仅提供空凭据模板，实际密钥、账号会话、代理认证、浏览器 Profile 和任务数据库保存在部署环境，不提交到仓库。
+
 - 控制台：<https://art2api.aiid.edu.kg>
 - 预发布服务器：192.168.3.5；服务端口：8797。
 - 服务目录：`/home/btcfoxman/docker/art2api`；Docker 网络：`my-shared-net`。
@@ -40,6 +42,8 @@
 3. “检测连接”核对代理出口、网页登录身份和模型目录，自动加载 10 个模型配置，再启用账号。
 4. 账号表格展示接入方式、代理地址、检测出口、登录状态、模型数量和运行任务。多个账号使用独立代理和浏览器 Profile。
 5. “查询网页任务”接受该账号已有的 Artlist generation ID，直接核对任务状态和输出文件，无须重复生成。
+
+账号编辑窗口的最大并发支持 1–20，保存后立即生效并持久化，无须重启。该数值限制账号未完成的任务总数，包含准备、提交和生成阶段；全局在途任务上限默认 100，在运行设置中单独调整。实际上游同时生成的数量仍受账号额度和平台限制约束，调高本地并发不会绕过上游限制。
 
 生成和查询通过固定代理发送 HTTP 协议请求。提交前服务端用该账号的原生 CDP 浏览器运行正常验证 SDK，不操作模型选择或生成按钮，并阻止浏览器发送生成请求。SDK 成功时携带一次性 `turnstileToken`；失败时按照网页客户端协议携带 SDK 实际返回的 `turnstileClientError`，是否接受由 Artlist 决定。需要交互验证时明确报错，不自动解题。该流程仍依赖后台 Chromium，不能称为完全无浏览器。保留可选的一次性验证令牌输入，仅供一个任务使用。明确拒绝会保存错误并交给渠道 fallback；提交结果未知时禁止重提。
 
