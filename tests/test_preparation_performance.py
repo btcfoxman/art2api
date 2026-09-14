@@ -221,3 +221,33 @@ async def test_rpc_timing_reports_lock_wait_and_request_time_separately(setup):
     metric = record['requests']['session']
     assert metric['calls'] == 1 and metric['queue_seconds'] >= .01 and metric['request_seconds'] >= .005
     assert 'private-cookie' not in json.dumps(record)
+
+
+@pytest.mark.asyncio
+async def test_parent_cancellation_waits_for_media_cleanup_without_recancelling(setup):
+    db, settings, aid = setup
+    web = WebClient(aid, db, settings)
+    started, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    cleaned = []
+    async def quick():
+        await asyncio.Event().wait()
+    async def slow():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await release.wait()  # Stand-in for FFmpeg wait or pending disk I/O.
+            cleaned.append(True)
+    parent = asyncio.create_task(web.parallel_uploads([quick(), slow()]))
+    await started.wait()
+    parent.cancel()
+    await cleaning.wait()
+    try:
+        await asyncio.sleep(.01)
+        assert not parent.done(), 'Cancellation interrupted media cleanup'
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await parent
+    assert cleaned == [True]

@@ -535,7 +535,10 @@ class WebClient:
             return await asyncio.gather(*jobs)
         except BaseException:
             for job in jobs:
-                job.cancel()
+                # gather already propagates parent cancellation. A second
+                # cancel would interrupt the child's FFmpeg/file cleanup.
+                if not job.done() and not job.cancelling():
+                    job.cancel()
             await asyncio.gather(*jobs, return_exceptions=True)
             raise
 
