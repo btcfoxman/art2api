@@ -186,6 +186,15 @@ function openTaskDetail(task) {
     const t = task.preparation_timing, seconds = n => `${Number(n).toFixed(2)} 秒`;
     fields.push(['准备期耗时', [['总计',t.total_seconds],['素材处理',t.media_seconds],['网页验证',t.verification_seconds],['报价校验',t.quote_seconds],['额度检查与建会话',t.eligibility_and_session_seconds]].filter(([,n]) => Number.isFinite(n)).map(([name,n]) => `${name} ${seconds(n)}`).join('；')]);
     if (t.browser) fields.push(['后台浏览器', `${t.browser.browser_reused ? '复用进程' : '新启动进程'}，${t.browser.page_reused ? '复用页面' : '加载页面'}；等待 ${seconds(t.browser.queue_seconds)}，页面准备 ${seconds(t.browser.browser_setup_seconds)}，SDK 验证 ${seconds(t.browser.sdk_seconds)}`]);
+    if (t.media_items?.length) {
+      fields.push(['素材传输', `经账号固定代理，每账号最多同时处理 ${t.media_parallelism} 份素材；下列耗时可能重叠，不能相加作为准备期总耗时。`]);
+      const names = {image_urls:'图片',video_urls:'视频',audio_urls:'音频',first_frame:'首帧',last_frame:'尾帧'};
+      for (const item of t.media_items) fields.push([`${names[item.field] || '素材'} ${item.index}${item.pass === 'padding' ? '（补齐静音）' : ''}`, [['总计',item.total_seconds],['等待',item.queue_seconds],['下载',item.download_seconds],['解析',item.probe_seconds],['转换',item.transform_seconds],['上传签名',item.sign_upload_seconds],['上传',item.upload_seconds],['下载签名',item.sign_read_seconds],['可读检查',item.read_check_seconds]].filter(([,n]) => Number.isFinite(n)).map(([name,n]) => `${name} ${seconds(n)}`).join('；')]);
+    }
+    if (t.requests) {
+      const requests = Object.values(t.requests);
+      fields.push(['协议请求', `共 ${requests.reduce((n,r) => n+(r.calls||0),0)} 次；累计等待 ${seconds(requests.reduce((n,r) => n+(r.queue_seconds||0),0))}；累计请求 ${seconds(requests.reduce((n,r) => n+(r.request_seconds||0),0))}；模型定义缓存命中 ${t.model_cache_hits||0} 次。累计时间可能重叠。`]);
+    }
   }
   for (const record of task.media_processing || []) {
     const audio = record.field === 'audio_urls';

@@ -60,7 +60,8 @@ async def test_safe_rpc_recovers_through_same_proxy_without_leaking_secrets(setu
         sleep.assert_awaited_once_with(1)
     finally:
         web_task_context.reset(token)
-    assert proxies == ['socks5://xray:20001']*2
+    assert proxies == ['socks5://xray:20001']
+    assert len(seen) == 2
     assert seen[0].content == seen[1].content and seen[0].url == seen[1].url
     events = db.events()
     assert [e['kind'] for e in events] == ['web_request_recovered', 'web_request_retry']
@@ -73,12 +74,14 @@ async def test_safe_rpc_recovers_through_same_proxy_without_leaking_secrets(setu
 async def test_safe_rpc_stops_after_three_attempts_with_diagnostic(setup):
     db, settings, aid = setup
     proxies = []
+    seen = []
     def responder(request):
+        seen.append(request)
         raise httpx.ConnectError('secret-address', request=request)
     with patch('app.web.client', factory_for(responder, proxies)), patch('app.web.asyncio.sleep', new_callable=AsyncMock) as sleep:
         with pytest.raises(GatewayError) as error:
             await WebClient(aid, db, settings).rpc('modelRouter.getCostQuote', {}, post=True)
-    assert len(proxies) == 3
+    assert len(proxies) == 1 and len(seen) == 3
     assert [c.args[0] for c in sleep.await_args_list] == [1, 2]
     assert error.value.code == 'proxy_error' and error.value.retryable
     assert 'ConnectError' in str(error.value) and '第 3 次' in str(error.value)

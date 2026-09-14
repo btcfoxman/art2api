@@ -33,7 +33,7 @@ class AccountCreate(BaseModel):
     model_config = ConfigDict(extra='forbid')
     name: str = Field(min_length=1, max_length=120)
     proxy_url: str = Field(min_length=1, max_length=2000)
-    max_concurrency: int = Field(default=1, ge=1, le=20)
+    max_concurrency: int = Field(default=1, ge=1, strict=True)
     backend: Literal['web', 'mcp'] = 'web'
 
 
@@ -41,7 +41,7 @@ class AccountPatch(BaseModel):
     model_config = ConfigDict(extra='forbid')
     name: str | None = Field(default=None, min_length=1, max_length=120)
     proxy_url: str | None = Field(default=None, min_length=1, max_length=2000)
-    max_concurrency: int | None = Field(default=None, ge=1, le=20)
+    max_concurrency: int | None = Field(default=None, ge=1, strict=True)
     enabled: bool | None = None
     backend: Literal['web', 'mcp'] | None = None
 

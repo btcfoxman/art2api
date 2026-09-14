@@ -78,6 +78,7 @@ class Service:
         for job in jobs:
             job.cancel()
         await asyncio.gather(*jobs, *([self.maintenance] if self.maintenance else []), return_exceptions=True)
+        await asyncio.gather(*(web.aclose() for web in self.web_clients.values()))
         await self.browsers.stop()
 
     def schedule(self, task_id):

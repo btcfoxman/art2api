@@ -10,6 +10,7 @@
 | GET | `/v1/videos/{id}` | 查询本地任务 |
 | POST | `/api/v3/contents/generations/tasks` | lingya2api 兼容提交 |
 | GET | `/api/v3/contents/generations/tasks/{id}` | lingya2api 兼容查询 |
+| POST / PATCH | `/api/accounts` / `/api/accounts/{id}` | 管理端创建或编辑账号；`max_concurrency` 为正整数，不设 20 的上限 |
 | PUT | `/api/accounts/{id}/web-session` | 管理端导入 Cookie/User-Agent/可选 team_id |
 | POST | `/api/accounts/{id}/web-verification` | 管理端登记一次性验证令牌 |
 | POST | `/api/accounts/{id}/web-quote` | 管理端无素材报价检测，不生成 |
@@ -29,3 +30,5 @@
 清空操作需要管理登录会话及 `X-Requested-With: art2api`，返回清理条数（如 `{"cleared":12}`），覆盖所有分页。清空后历史任务仍可按 ID 查询，幂等记录保持有效，不会因清空而重复生成。
 
 导入网页登录会话时 `team_id` 可留空。创建会话会按网页协议自动生成 UUID 填入必需的 `teamId`，无需查询或填写账号团队信息；已有显式配置仍保留兼容。
+
+任务仍受运行设置中的全局在途任务上限及上游实际额度约束。素材下载与上传均走所属账号的固定代理；每账号最多同时处理 3 份素材，按原请求顺序提交。管理端任务详情包含素材分项耗时和协议请求等待时间，业务查询接口不返回内部诊断信息。

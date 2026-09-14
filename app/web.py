@@ -6,10 +6,12 @@ import mimetypes
 import tempfile
 import time
 import uuid
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from datetime import datetime
 from fractions import Fraction
 from http.cookies import SimpleCookie
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 from pathlib import Path
 from urllib.parse import parse_qs, urljoin, urlsplit
 
@@ -19,7 +21,7 @@ from jsonschema import Draft202012Validator, ValidationError
 from app.catalog import local_schema
 from app.cookies import parse_cookie_header
 from app.errors import GatewayError
-from app.media import adapt_reference_video, append_audio_silence, audio_silence_plan, fps_in_range
+from app.media import adapt_reference_video, append_audio_silence, audio_silence_plan, fps_in_range, probe
 from app.network import client, public_media_url
 from app.web_catalog import GROUPS, reference_header, generation_payload, generation_result, profiles, quote_input, reference_prompt, validate_request
 
@@ -50,6 +52,34 @@ TRANSIENT_TRANSPORT_ERRORS = (
     httpx.TimeoutException, httpx.NetworkError, httpx.ProxyError, httpx.RemoteProtocolError,
 )
 web_task_context = ContextVar('web_task_context', default=None)
+preparation_context = ContextVar('preparation_context', default=None)
+media_context = ContextVar('media_context', default=None)
+
+
+class NoStoredCookies(DefaultCookiePolicy):
+    # Session cookies come from the encrypted DB, never a pooled client's jar.
+    # Download hosts must not plant cookies for later upload requests either.
+    def set_ok(self, cookie, request):
+        return False
+
+
+@contextmanager
+def measure(record, key):
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        record[key] = round(record.get(key, 0) + time.monotonic() - started, 3)
+
+
+async def file_io(function, *args):
+    # Wait for in-flight disk work on cancellation before removing its temp dir.
+    job = asyncio.create_task(asyncio.to_thread(function, *args))
+    try:
+        return await asyncio.shield(job)
+    except asyncio.CancelledError:
+        await asyncio.gather(job, return_exceptions=True)
+        raise
 
 
 def rejection_reason(response):
@@ -97,6 +127,39 @@ class WebClient:
         self.account_id, self.db, self.settings = account_id, db, settings
         self.lock = asyncio.Lock()
         self.browsers = browsers
+        self.proxy_version = self.db.account(account_id)['proxy_version']
+        self.http = None
+        self.media_http = None
+        self.media_slots = asyncio.Semaphore(3)
+        self.model_lock = asyncio.Lock()
+        self.model_cache = {}
+
+    def pooled_client(self, *, media=False):
+        account = self.db.account(self.account_id, True)
+        if account['proxy_version'] != self.proxy_version:
+            raise GatewayError('账号固定代理已变更', 'proxy_binding_changed')
+        attr = 'media_http' if media else 'http'
+        http = getattr(self, attr)
+        if http is None:
+            http = client(account['credentials']['proxy_url'], self.settings.request_timeout,
+                          cookies=CookieJar(policy=NoStoredCookies()),
+                          limits=httpx.Limits(max_connections=3 if media else 1,
+                                             max_keepalive_connections=3 if media else 1,
+                                             keepalive_expiry=60))
+            setattr(self, attr, http)
+        return http
+
+    @asynccontextmanager
+    async def media_client(self):
+        yield self.pooled_client(media=True)
+
+    async def aclose(self):
+        for attr in ('http', 'media_http'):
+            http = getattr(self, attr)
+            if http is not None:
+                await http.aclose()
+                setattr(self, attr, None)
+        self.model_cache.clear()
 
     def secret(self):
         return self.db.account(self.account_id, True)['credentials']
@@ -108,12 +171,20 @@ class WebClient:
         binding = (account['proxy_version'], account['credentials'].get('web_user_id'))
         started = time.monotonic()
         for attempt in range(1, attempts+1):
+            timing = preparation_context.get()
+            metric = timing.setdefault('requests', {}).setdefault(path.rsplit('/', 1)[-1], {}) if timing is not None else {}
             try:
-                async with self.lock:
+                with measure(metric, 'queue_seconds'):
+                    await self.lock.acquire()
+                try:
                     current = self.db.account(self.account_id, True)
                     if (current['proxy_version'], current['credentials'].get('web_user_id')) != binding:
                         raise GatewayError('请求重试期间账号或固定代理已变更', 'proxy_binding_changed')
-                    response = await self._request(method, path, **kwargs)
+                    metric['calls'] = metric.get('calls', 0) + 1
+                    with measure(metric, 'request_seconds'):
+                        response = await self._request(method, path, **kwargs)
+                finally:
+                    self.lock.release()
             except httpx.TransportError as exc:
                 retry = isinstance(exc, TRANSIENT_TRANSPORT_ERRORS) and attempt < attempts
                 # Exception strings can contain proxy credentials, cookies or
@@ -143,8 +214,9 @@ class WebClient:
                    'Origin': BASE, 'Referer': BASE+'/', 'x-trpc-source': 'react', 'x-request-id': str(uuid.uuid4())}
         if path != '/api/auth/session' and (not path.startswith('/api/trpc/') or path.removeprefix('/api/trpc/') not in PROCEDURES):
             raise ValueError('网页接口不在已采集的接口清单中')
-        async with client(secret['proxy_url'], self.settings.request_timeout, headers=headers) as http:
-            response = await http.request(method, BASE+path, **kwargs)
+        timeout = self.settings.request_timeout
+        response = await self.pooled_client().request(method, BASE+path, headers=headers,
+                         timeout=httpx.Timeout(timeout, connect=min(timeout, 20)), **kwargs)
         if response.status_code == 401:
             self.db.update_account(self.account_id, enabled=False, status='unauthorized', last_error='网页登录已失效，请重新登录')
             raise GatewayError('Artlist 网页登录已失效', 'reauthorization_required', 401)
@@ -180,7 +252,9 @@ class WebClient:
                         jar.pop(name, None)
                     else:
                         jar[name] = morsel.value
-            self.db.update_credentials(self.account_id, {'web_cookie': '; '.join(f'{k}={v}' for k,v in jar.items())})
+            self.db.update_web_session_if_current(self.account_id, secret,
+                {'cookie': '; '.join(f'{k}={v}' for k,v in jar.items()),
+                 'user_agent': secret.get('web_user_agent', '')})
         return body
 
     async def rpc(self, name, value=None, *, post=False):
@@ -209,27 +283,50 @@ class WebClient:
                                catalog={'source': 'web_cdp_capture', 'model_groups': [{'id': gid, 'name': live[gid]['name']} for gid in set(GROUPS.values()) if gid in live]})
         return available
 
+    async def model_definition(self, model_id, *, refresh=False):
+        # Only cache schema definitions. Cost signatures, eligibility, session
+        # and verification results must be obtained for each generation.
+        async with self.model_lock:
+            identity = self.secret().get('web_user_id')
+            key = (identity, model_id)
+            cached = self.model_cache.get(key)
+            if cached and not refresh and time.monotonic() - cached[0] < 300:
+                timing = preparation_context.get()
+                if timing is not None:
+                    timing['model_cache_hits'] = timing.get('model_cache_hits', 0) + 1
+                return cached[1], True
+            model = await self.rpc('modelRouter.getModel', {'modelId': model_id})
+            if len(self.model_cache) >= 128:
+                self.model_cache.pop(next(iter(self.model_cache)))
+            self.model_cache[key] = (time.monotonic(), model)
+            return model, False
+
     async def quote(self, request, assets=None, *, allow_short_audio=False):
         validate_request(request, profiles()[request['model']])
         payload, inputs, settings, artifacts = quote_input(request, assets or {})
         quote = await self.rpc('modelRouter.getCostQuote', payload, post=True)
         if not isinstance(quote, dict) or not all(k in quote for k in ('modelId','cost','modelFeature','digitalSignature','timestamp')):
             raise GatewayError('Artlist 未返回完整报价签名或子模型 ID', 'web_protocol_error')
-        model = await self.rpc('modelRouter.getModel', {'modelId': quote['modelId']})
-        if model.get('modelGroupId') != GROUPS[request['model']]:
-            raise GatewayError('报价返回的子模型与请求模型组不一致', 'web_protocol_error')
-        schemas = [c.get('internalConfig', {}).get('properties', {}).get('input') for c in model.get('configs', [])]
+        model, cached = await self.model_definition(quote['modelId'])
         schema_input = {**settings, **{k:([x['fileUrl'] for x in v] if isinstance(v,list) and v and isinstance(v[0],dict) and 'fileUrl' in v[0] else v['fileUrl'] if isinstance(v,dict) and 'fileUrl' in v else v) for k,v in inputs.items()}}
         valid = False
-        for schema in schemas:
-            if not schema:
-                continue
-            try:
-                Draft202012Validator(local_schema(schema)).validate(schema_input)
-                valid = True
+        for attempt in range(2):
+            group_matches = model.get('modelGroupId') == GROUPS[request['model']]
+            schemas = [c.get('internalConfig', {}).get('properties', {}).get('input') for c in model.get('configs', [])]
+            for schema in schemas if group_matches else []:
+                if not schema:
+                    continue
+                try:
+                    Draft202012Validator(local_schema(schema)).validate(schema_input)
+                    valid = True
+                    break
+                except ValidationError:
+                    continue
+            if valid or not cached or attempt:
                 break
-            except ValidationError:
-                continue
+            model, _ = await self.model_definition(quote['modelId'], refresh=True)
+        if not group_matches:
+            raise GatewayError('报价返回的子模型与请求模型组不一致', 'web_protocol_error')
         if not valid:
             raise ValueError('请求参数不符合 Artlist 当前所选子模型的定义')
         self.validate_media(assets or {}, quote.get('modelContextConfig', {}), allow_short_audio=allow_short_audio)
@@ -294,28 +391,44 @@ class WebClient:
                 raise ValueError('Artlist 子模型不支持首尾帧设置')
 
     async def upload(self, url, kind, *, reference_request=None, silence_seconds=0):
+        record = media_context.get()
+        if record is None:
+            record = {}
+        with measure(record, 'total_seconds'):
+            with measure(record, 'queue_seconds'):
+                await self.media_slots.acquire()
+            try:
+                return await self._upload(url, kind, record, reference_request=reference_request,
+                                          silence_seconds=silence_seconds)
+            finally:
+                self.media_slots.release()
+
+    async def _upload(self, url, kind, record, *, reference_request=None, silence_seconds=0):
         public_media_url(url)
-        async with client(self.secret()['proxy_url'], max(120, self.settings.request_timeout)) as http:
-            for _ in range(4):
-                async with http.stream('GET', url) as response:
-                    if response.is_redirect:
-                        url = public_media_url(urljoin(url, response.headers.get('location','')))
-                        continue
-                    if response.status_code >= 400:
-                        raise ValueError('参考素材下载失败')
-                    mime = response.headers.get('content-type','').split(';')[0].strip().lower()
-                    if not mime.startswith(kind+'/'):
-                        mime = mimetypes.guess_type(urlsplit(url).path)[0] or ''
-                    if not mime.startswith(kind+'/'):
-                        raise ValueError('参考素材类型不匹配')
-                    content = bytearray()
-                    async for chunk in response.aiter_bytes():
-                        content.extend(chunk)
-                        if len(content)>150*1024*1024:
-                            raise ValueError('参考素材超过 150 MiB')
-                    break
-            else:
-                raise ValueError('参考素材重定向次数过多')
+        timeout = httpx.Timeout(max(120, self.settings.request_timeout), connect=20)
+        async with self.media_client() as http:
+            with measure(record, 'download_seconds'):
+                for _ in range(4):
+                    async with http.stream('GET', url, timeout=timeout) as response:
+                        if response.is_redirect:
+                            url = public_media_url(urljoin(url, response.headers.get('location','')))
+                            continue
+                        if response.status_code >= 400:
+                            raise ValueError('参考素材下载失败')
+                        mime = response.headers.get('content-type','').split(';')[0].strip().lower()
+                        if not mime.startswith(kind+'/'):
+                            mime = mimetypes.guess_type(urlsplit(url).path)[0] or ''
+                        if not mime.startswith(kind+'/'):
+                            raise ValueError('参考素材类型不匹配')
+                        content = bytearray()
+                        async for chunk in response.aiter_bytes():
+                            content.extend(chunk)
+                            if len(content)>150*1024*1024:
+                                raise ValueError('参考素材超过 150 MiB')
+                        break
+                else:
+                    raise ValueError('参考素材重定向次数过多')
+            record['download_bytes'] = len(content)
             # Linux mime databases often know audio/x-wav but omit audio/wav.
             # Wire filenames must be stable across the developer OS and Docker.
             suffix = {
@@ -331,17 +444,9 @@ class WebClient:
             processing = None
             with tempfile.TemporaryDirectory(prefix='art-media-') as directory:
                 path = Path(directory)/filename
-                path.write_bytes(content)
-                process = await asyncio.create_subprocess_exec('ffprobe','-v','error','-show_streams','-show_format','-of','json',str(path),stdout=asyncio.subprocess.PIPE,stderr=asyncio.subprocess.DEVNULL)
-                try:
-                    stdout,_ = await asyncio.wait_for(process.communicate(),30)
-                except asyncio.TimeoutError:
-                    process.kill()
-                    await process.wait()
-                    raise ValueError('参考素材信息解析超时') from None
-                if process.returncode:
-                    raise ValueError('参考素材无法解析')
-                media=json.loads(stdout)
+                with measure(record, 'probe_seconds'):
+                    await file_io(path.write_bytes, content)
+                    media = await probe(path)
                 visual=next((s for s in media.get('streams',[]) if s.get('codec_type')=='video'),{})
                 if kind in {'image','video'}:
                     metadata.update(width=visual.get('width',0),height=visual.get('height',0))
@@ -355,31 +460,38 @@ class WebClient:
                     except (ValueError, ZeroDivisionError):
                         raise ValueError('参考视频缺少有效帧率') from None
                 if kind == 'video' and reference_request is not None:
-                    path, metadata, processing = await adapt_reference_video(
-                        path, metadata, reference_request, self.settings.sd25_video_policy)
+                    with measure(record, 'transform_seconds'):
+                        path, metadata, processing = await adapt_reference_video(
+                            path, metadata, reference_request, self.settings.sd25_video_policy)
                 if kind == 'audio' and silence_seconds:
-                    path, metadata, processing = await append_audio_silence(path, metadata, silence_seconds)
+                    with measure(record, 'transform_seconds'):
+                        path, metadata, processing = await append_audio_silence(path, metadata, silence_seconds)
                 if processing:
                     if metadata['byteSize'] > 150*1024*1024:
                         raise ValueError('参考素材转换后超过 150 MiB')
-                    content = bytearray(path.read_bytes())
+                    content = await file_io(path.read_bytes)
                     mime, filename = metadata['mimeType'], metadata['fileName']
             request={'fileName':filename,'fileType':mime,'expiresIn':86400}
             request.update({k:metadata[k] for k in ('width','height') if k in metadata})
-            signed=await self.rpc('uploadRouter.getPresignedUrl',request,post=True)
+            with measure(record, 'sign_upload_seconds'):
+                signed=await self.rpc('uploadRouter.getPresignedUrl',request,post=True)
             target=public_media_url(signed['presignedUrl'])
             host=urlsplit(target).hostname
             if not host.endswith('.amazonaws.com') or not host.startswith('artlist-'):
                 raise ValueError('上传签名地址不在 Artlist 存储域名内')
             # The upload client has no Artlist cookies or authorization headers.
-            response=await http.put(target,content=bytes(content),headers={'Content-Type':mime})
+            content = bytes(content)
+            with measure(record, 'upload_seconds'):
+                response=await http.put(target,content=content,headers={'Content-Type':mime},timeout=timeout)
+            record['upload_bytes'] = len(content)
             if not 200<=response.status_code<300:
                 raise ValueError('Artlist 参考素材上传失败')
             # The bucket is private: fileUrl is an unsigned object location and
             # presignedUrl above authorizes PUT only. Match the captured browser
             # flow by obtaining a separate GET signature after the upload.
-            preview=await self.rpc('uploadRouter.getPresignedUrlFromKey',
-                                   {'fileKey':signed['fileKey'],'expiresIn':86400},post=True)
+            with measure(record, 'sign_read_seconds'):
+                preview=await self.rpc('uploadRouter.getPresignedUrlFromKey',
+                                       {'fileKey':signed['fileKey'],'expiresIn':86400},post=True)
             readable=public_media_url(preview.get('presignedUrl',''))
             location,uploaded=urlsplit(readable),urlsplit(target)
             query=parse_qs(location.query)
@@ -388,24 +500,46 @@ class WebClient:
                 raise GatewayError('Artlist 未返回对应素材的有效下载签名', 'media_signature_invalid', 422)
             # Verify access without Artlist session headers before any billable
             # generation; a signed GET must not be tested with unsigned HEAD.
-            async with http.stream('GET',readable,headers={'Range':'bytes=0-0'}) as access:
-                if access.status_code not in {200,206}:
-                    raise GatewayError(f'Artlist 上传素材不可读取（HTTP {access.status_code}）', 'media_unreachable', 422)
+            with measure(record, 'read_check_seconds'):
+                async with http.stream('GET',readable,headers={'Range':'bytes=0-0'},timeout=timeout) as access:
+                    if access.status_code not in {200,206}:
+                        raise GatewayError(f'Artlist 上传素材不可读取（HTTP {access.status_code}）', 'media_unreachable', 422)
+                    # Consume a genuine one-byte range so HTTP/1.1 can reuse its
+                    # connection; never download the whole object for HTTP 200.
+                    if access.status_code == 206:
+                        received = 0
+                        async for chunk in access.aiter_bytes():
+                            received += len(chunk)
+                            if received > 1:
+                                break
             return {'file_key':signed['fileKey'],'file_url':readable,'metadata':metadata,
                     **({'processing': processing} if processing else {})}
 
     async def prepare(self, task):
         started = time.monotonic()
         timing = {}
+        context = preparation_context.set(timing)
         try:
             return await self._prepare(task, timing)
         finally:
+            preparation_context.reset(context)
             timing['total_seconds'] = round(time.monotonic()-started, 3)
             self.db.update_task(task['id'], result={**self.db.task(task['id'])['result'], 'preparation_timing': timing})
 
-    async def _prepare(self, task, timing):
-        timing['stage'] = 'media'
-        phase = time.monotonic()
+    @staticmethod
+    async def parallel_uploads(uploads):
+        # gather preserves input order. On failure/cancellation, drain siblings
+        # before unwinding so no upload or FFmpeg survives its failed task.
+        jobs = [asyncio.create_task(upload) for upload in uploads]
+        try:
+            return await asyncio.gather(*jobs)
+        except BaseException:
+            for job in jobs:
+                job.cancel()
+            await asyncio.gather(*jobs, return_exceptions=True)
+            raise
+
+    async def _prepare_media(self, task, timing):
         request=task['request']
         validate_request(request,task['profile'])
         _, tags = reference_prompt(request)
@@ -415,17 +549,32 @@ class WebClient:
                 'action': '前置已使用的引用标签，长编号优先映射；保留完整原文和素材序号',
             }})
         assets={}
+        timing['media_parallelism'] = 3
+        timing['media_items'] = []
         def save_processing():
             records = [{**asset['processing'], 'field': key, 'index': index+1}
-                       for key, values in assets.items() for index, asset in enumerate(values) if asset.get('processing')]
+                       for key, values in assets.items() for index, asset in enumerate(values) if asset and asset.get('processing')]
             if records:
                 self.db.update_task(task['id'], result={**self.db.task(task['id'])['result'], 'media_processing': records})
+        async def upload_reference(field, index, url, kind, options, record):
+            context = media_context.set(record)
+            try:
+                assets[field][index] = await self.upload(url, kind, **options)
+            finally:
+                media_context.reset(context)
+                save_processing()
+        def schedule_upload(field, index, url, kind, options):
+            record = {'field': field, 'index': index+1, 'pass': 'padding' if options.get('silence_seconds') else 'initial'}
+            timing['media_items'].append(record)
+            return upload_reference(field, index, url, kind, options, record)
+        uploads = []
         for field,kind in [('image_urls','image'),('video_urls','video'),('audio_urls','audio'),('first_frame','image'),('last_frame','image')]:
             urls=request.get(field) or []
             if isinstance(urls,str):urls=[urls]
             options = {'reference_request': request} if field == 'video_urls' and task['profile']['group_id'] == 515 else {}
-            assets[field]=[await self.upload(url,kind,**options) for url in urls]
-            save_processing()
+            assets[field] = [None] * len(urls)
+            uploads.extend(schedule_upload(field, index, url, kind, options) for index, url in enumerate(urls))
+        await self.parallel_uploads(uploads)
         if assets.get('audio_urls'):
             # Resolve actual per-file/total limits before padding; this quote is
             # never submitted. Only the final quote below may authorize a job.
@@ -434,15 +583,22 @@ class WebClient:
             plan = audio_silence_plan(assets['audio_urls'], context)
             if any(plan) and context.get('audioFormats') and 'WAV' not in context['audioFormats']:
                 raise ValueError('Artlist 当前子模型不支持补齐后使用的 WAV 音频格式')
+            uploads = []
             for index, seconds in enumerate(plan):
                 if seconds:
                     # Read the exact uploaded object, not a potentially changing
                     # caller URL. Downloads/uploads keep this account's proxy.
-                    assets['audio_urls'][index] = await self.upload(
-                        assets['audio_urls'][index]['file_url'], 'audio', silence_seconds=seconds)
-                    save_processing()
+                    uploads.append(schedule_upload('audio_urls', index,
+                        assets['audio_urls'][index]['file_url'], 'audio', {'silence_seconds': seconds}))
+            await self.parallel_uploads(uploads)
             self.validate_media(assets, context)
-        timing['media_seconds'] = round(time.monotonic()-phase, 3)
+        return assets
+
+    async def _prepare(self, task, timing):
+        timing['stage'] = 'media'
+        request = task['request']
+        with measure(timing, 'media_seconds'):
+            assets = await self._prepare_media(task, timing)
         # A cold browser verification may take tens of seconds. Obtain the
         # short-lived cost signature only after normal verification completes.
         timing['stage'] = 'verification'

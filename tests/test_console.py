@@ -29,6 +29,23 @@ def account(db, port=20001):
     return db.save_account({'enabled': True}, value['id'])
 
 
+def test_account_concurrency_has_no_twenty_limit_and_requires_positive_integer(config):
+    app = create_app(config)
+    with TestClient(app) as http:
+        http.post('/login', data={'token': config.admin_token})
+        response = http.post('/api/accounts', headers=MARKER, json={
+            'name': 'Large account', 'proxy_url': 'socks5://proxy:20001', 'max_concurrency': 250})
+        assert response.status_code == 200
+        aid = response.json()['id']
+        assert response.json()['max_concurrency'] == 250
+        for value in (21, 1000, 1000000):
+            response = http.patch('/api/accounts/'+aid, headers=MARKER, json={'max_concurrency': value})
+            assert response.status_code == 200 and response.json()['max_concurrency'] == value
+        for value in (0, -1, 1.5, True, '20'):
+            assert http.patch('/api/accounts/'+aid, headers=MARKER, json={'max_concurrency': value}).status_code == 422
+        assert app.state.db.account(aid)['max_concurrency'] == 1000000
+
+
 def test_settings_access_validation_and_restart_persistence(config):
     original = replace(config)
     app = create_app(config)
