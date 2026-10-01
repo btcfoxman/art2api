@@ -85,6 +85,9 @@ def test_new_upstream_failures_store_safe_category_without_raw_reason():
     assert maintenance['public_error_message'] == UPSTREAM_MAINTENANCE
     assert len(PUBLIC_MESSAGES) == 24
     assert public_message('media_upload_failed', 'Artlist 素材上传连接中断') == MEDIA_UPLOAD
+    assert public_error('generation_failed', 'provider private detail',
+                        upstream_code='FILE_OPTIMIZATION_FAILED',
+                        stored_message=GENERATION_FAILED)['message'] == REFERENCE_MEDIA_FAILED
     for literal in PUBLIC_MESSAGES:
         assert public_message('generation_failed', literal) == literal
 

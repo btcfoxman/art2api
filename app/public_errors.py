@@ -53,6 +53,8 @@ def public_message(code='', message='', upstream_code=''):
     if code in {'submission_unknown', 'upstream_outcome_unknown'}:
         # Unknown submission outcomes must not suggest a confirmed refund.
         return QUEUE_INTERRUPTED
+    if message == GENERATION_FAILED and str(upstream_code).upper() == 'FILE_OPTIMIZATION_FAILED':
+        return REFERENCE_MEDIA_FAILED
     if message in PUBLIC_MESSAGES:
         return message
     text = f'{upstream_code} {message}'.lower()
