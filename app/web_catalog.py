@@ -68,10 +68,10 @@ def reference_prompt(request):
     if request.get('first_frame'):
         return prompt, []
     referenced = set()
-    for field, prefix, aliases in [
-        ('image_urls', '@img', r'img|image|参考(?:图片|图像|图)?|图片|图像|图'),
-        ('video_urls', '@vid', r'vid|video|(?:参考)?视频'),
-        ('audio_urls', '@aud', r'aud|audio|(?:参考)?音频|声音|语音'),
+    for field, prefix, aliases, plain_aliases in [
+        ('image_urls', '@img', r'img|image|参考(?:图片|图像|图)?|图片|图像|图', r'参考(?:图片|图像|图)|图片|图像|图'),
+        ('video_urls', '@vid', r'vid|video|(?:参考)?视频', r'(?:参考)?视频'),
+        ('audio_urls', '@aud', r'aud|audio|(?:参考)?音频|声音|语音', r'(?:参考)?音频'),
     ]:
         def replace(match):
             index = int(match.group(1))
@@ -81,6 +81,11 @@ def reference_prompt(request):
             referenced.add((field, prefix, index))
             return tag
         prompt = re.sub(r'@(?:'+aliases+r')(\d+)(?![0-9A-Za-z_])', replace, prompt, flags=re.IGNORECASE)
+        if request.get(field):
+            # Prompts commonly use 图1 / 音频1 without an @ prefix. Bind those
+            # numbered assets too, while leaving generic "参考图片" text alone.
+            prompt = re.sub(r'(?<![@0-9A-Za-z])(?:'+plain_aliases+r')(\d+)(?![0-9A-Za-z_])',
+                            replace, prompt)
     order = {'image_urls':0, 'video_urls':1, 'audio_urls':2}
     tags = [{'tagId':f'{prefix}{index}', 'type':prefix, 'orderForType':index}
             for field,prefix,index in sorted(referenced,key=lambda value:(order[value[0]],-len(str(value[2])),value[2]))]
@@ -102,13 +107,37 @@ def reference_header(request, tags):
     return ' '.join(tag['tagId'] for tag in ordered) + '\n' if tags else ''
 
 
+_DIALOGUE = re.compile(r'台词[^\r\n：:]{0,80}[：:]\s*[“「『"‘\']([^”」』"’\'\r\n]{1,200})')
+
+
+def speech_language_prompt(prompt):
+    """Label Japanese dialogue at the line itself, as verified by a successful job.
+
+    The web model has no speech-language setting. In an otherwise identical
+    generation, adding 日文 before each 台词 produced the requested Japanese.
+    """
+    starts = []
+    for match in _DIALOGUE.finditer(prompt):
+        if not any('\u3040' <= char <= '\u30ff' for char in match.group(1)):
+            continue
+        start = match.start()
+        if prompt[max(0, start - 3):start].endswith(('日文', '日语', '英文', '英语', '中文')):
+            continue
+        starts.append(start)
+    for start in reversed(starts):
+        prompt = prompt[:start] + '日文' + prompt[start:]
+    return prompt
+
+
 def quote_input(request, assets):
     group = GROUPS[request['model']]
     defaults = SNAPSHOT['groups'][str(group)]['defaults']
     settings = {k: request[k] for k in ('prompt', 'duration', 'resolution', 'aspect_ratio')}
     prompt, tags = reference_prompt(request)
-    settings['prompt'] = prompt
     settings['generate_audio'] = request.get('generate_audio', defaults.get('generate_audio') == 'true')
+    if settings['generate_audio']:
+        prompt = speech_language_prompt(prompt)
+    settings['prompt'] = prompt
     # Seedance 2.5's reference-video and start/end-frame submodels require
     # auto. The selected submodel derives shape from the uploaded media.
     if group == 515 and (assets.get('video_urls') or assets.get('first_frame')):

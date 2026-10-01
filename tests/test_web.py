@@ -94,6 +94,39 @@ def test_media_without_prompt_mentions_does_not_invent_reference_tags():
     assert len(inputs['image_urls'])==len(artifacts)==1
 
 
+def test_numbered_chinese_references_bind_assets_and_label_japanese_dialogue():
+    original = ('图1 音频1 台词（冷静）：“犯人が死ななければ、もっと多くの家庭が壊れる！”\n'
+                '图4 音频2 台词：“あとは、あいつの名前だけだな。”')
+    request = normalize_request({'model': 'doubao-seedance-2-0-fast-260128', 'prompt': original,
+                                 'image_urls': [f'https://media.example/image{n}' for n in range(1, 5)],
+                                 'audio_urls': [f'https://media.example/audio{n}' for n in range(1, 3)]})
+    assets = {field: [{'file_key': str(n), 'file_url': url, 'metadata': {'durationMs': 4000}}
+                      for n, url in enumerate(request[field], 1)] for field in ('image_urls', 'audio_urls')}
+    quote, inputs, settings, _ = quote_input(request, assets)
+    expected = ('@aud1 @aud2 @img1 @img4\n'
+                '@img1 @aud1 日文台词（冷静）：“犯人が死ななければ、もっと多くの家庭が壊れる！”\n'
+                '@img4 @aud2 日文台词：“あとは、あいつの名前だけだな。”')
+    assert quote['input']['prompt'] == inputs['prompt'] == settings['prompt'] == expected
+    assert inputs['tagReferences'] == settings['tagReferences'] == [
+        {'tagId': '@img1', 'type': '@img', 'orderForType': 1},
+        {'tagId': '@img4', 'type': '@img', 'orderForType': 4},
+        {'tagId': '@aud1', 'type': '@aud', 'orderForType': 1},
+        {'tagId': '@aud2', 'type': '@aud', 'orderForType': 2},
+    ]
+    assert request['prompt'] == original
+
+
+def test_japanese_dialogue_respects_explicit_language_and_audio_false():
+    prompt = '音频1 日文台词：“上に伝えて。”\n音频1 台词：“私もいる。”\n音频1 台词：“你好。”'
+    request = normalize_request({'model': 'doubao-seedance-2-0-fast-260128', 'prompt': prompt,
+                                 'audio_urls': ['https://media.example/audio']})
+    asset = {'file_key': 'audio', 'file_url': request['audio_urls'][0], 'metadata': {'durationMs': 4000}}
+    _, inputs, _, _ = quote_input(request, {'audio_urls': [asset]})
+    assert inputs['prompt'] == '@aud1\n@aud1 日文台词：“上に伝えて。”\n@aud1 日文台词：“私もいる。”\n@aud1 台词：“你好。”'
+    _, muted, _, _ = quote_input({**request, 'generate_audio': False}, {'audio_urls': [asset]})
+    assert muted['prompt'] == '@aud1\n' + prompt.replace('音频1', '@aud1')
+
+
 def test_sd25_late_audio_reference_gets_leading_index_without_losing_prompt_or_adding_unused_tags():
     original = '参考@图片2。' + '保留完整场景与镜头说明。' * 240 + '\n对白音色参考：@音频1。'
     request = normalize_request({'model': MODEL, 'prompt': original,
