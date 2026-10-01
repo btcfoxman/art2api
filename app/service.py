@@ -189,6 +189,24 @@ class Service:
                               account_id, task_id)
                 await asyncio.sleep(delay)
 
+    async def reconcile_web_submission(self, web, task_id, account_id):
+        session_id = self.db.task(task_id)['result'].get('chat_session_id')
+        if not session_id:
+            return None
+        for delay in (0, 2, 5):
+            if delay:
+                await asyncio.sleep(delay)
+            try:
+                generation_id = await web.generation_in_session(session_id)
+            except GatewayError:
+                continue
+            if generation_id:
+                self.db.event('web_submission_reconciled',
+                              'Recovered generation ID from the original chat session',
+                              account_id, task_id)
+                return generation_id
+        return None
+
     async def run(self, task_id):
         task = self.db.task(task_id)
         context_token = web_task_context.set(task_id)
@@ -209,17 +227,20 @@ class Service:
                     try:
                         upstream_id = await web.submit(arguments)
                     except GatewayError as exc:
-                        if exc.code != 'generation_rejected' or not exc.retryable:
+                        if exc.code == 'generation_rejected' and exc.retryable:
+                            # Exact {"success": false} confirms no generation was created.
+                            self.db.event('web_submission_retry', 'Explicit 403 rejection; refreshing verification and quote once',
+                                          account['id'], task_id)
+                            self.db.update_task(task_id, status='preparing')
+                            arguments = await self.prepare_web(web, task_id, account['id'])
+                            self.db.update_task(task_id, status='submitting')
+                            upstream_id = await web.submit(arguments)
+                        elif exc.code != 'generation_rejected':
+                            upstream_id = await self.reconcile_web_submission(web, task_id, account['id'])
+                            if not upstream_id:
+                                raise
+                        else:
                             raise
-                        # A 403 with exactly {"success": false} explicitly confirms
-                        # that no generation was created. Refresh verification and
-                        # the cost signature once; never repeat an unknown submit.
-                        self.db.event('web_submission_retry', 'Explicit 403 rejection; refreshing verification and quote once',
-                                      account['id'], task_id)
-                        self.db.update_task(task_id, status='preparing')
-                        arguments = await self.prepare_web(web, task_id, account['id'])
-                        self.db.update_task(task_id, status='submitting')
-                        upstream_id = await web.submit(arguments)
                 else:
                     tools = await mcp.list_tools()
                     await self.oauth.access_token(account['id'])

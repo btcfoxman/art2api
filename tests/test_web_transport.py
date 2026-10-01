@@ -274,6 +274,38 @@ async def test_media_download_failure_retries_only_before_submission(setup, fail
 
 
 @pytest.mark.asyncio
+async def test_unknown_submit_recovers_existing_generation_from_unique_session(setup):
+    db, settings, aid = setup
+    service = Service(db, settings)
+    web = AsyncMock()
+    web.prepare.return_value = {'prepared': True}
+    web.submit.side_effect = GatewayError('upstream 500', 'web_upstream_error', 502, retryable=True)
+    web.generation_in_session.return_value = 'existing-generation'
+    web.query.return_value = {'status': 'succeeded', 'video_url': 'https://media.example/result.mp4'}
+    service.web = lambda _: web
+    task = await service.create({'model': 'sd-2-5-480p', 'prompt': 'test'}, 'reconcile-session')
+    db.update_task(task['id'], result={'chat_session_id': 'unique-session'})
+    await asyncio.gather(*list(service.jobs.values()))
+    stored = db.task(task['id'])
+    assert stored['status'] == 'succeeded' and stored['upstream_id'] == 'existing-generation'
+    web.submit.assert_awaited_once()
+    web.generation_in_session.assert_awaited_once_with('unique-session')
+    assert len([e for e in db.events() if e['kind'] == 'web_submission_reconciled']) == 1
+
+
+@pytest.mark.asyncio
+async def test_session_lookup_requires_exactly_one_generation(setup):
+    db, settings, aid = setup
+    web = WebClient(aid, db, settings)
+    for items, expected in [([], None), ([{'id': 'found'}], 'found'),
+                            ([{'id': 'one'}, {'id': 'two'}], None)]:
+        web.rpc = AsyncMock(return_value={'items': items, 'nextCursor': None})
+        assert await web.generation_in_session('session-1') == expected
+        web.rpc.assert_awaited_once_with('userGenerationRouter.getUserGenerationsBySession',
+                                         {'sessionId': 'session-1'})
+
+
+@pytest.mark.asyncio
 async def test_retry_stops_when_proxy_binding_changes(setup):
     db, settings, aid = setup
     proxies = []

@@ -693,6 +693,17 @@ class WebClient:
         self.db.update_account(self.account_id, last_error='')
         return str(data['id'])
 
+    async def generation_in_session(self, session_id):
+        """Find a generation after an uncertain submit, without creating another."""
+        data = await self.rpc('userGenerationRouter.getUserGenerationsBySession',
+                              {'sessionId': session_id})
+        if not isinstance(data, dict) or not isinstance(data.get('items'), list):
+            raise GatewayError('Artlist 会话查询结果无效', 'web_protocol_error')
+        items = data['items']
+        if len(items) == 1 and not data.get('nextCursor') and items[0].get('id'):
+            return str(items[0]['id'])
+        return None
+
     async def query(self, generation_id):
         data=await self.rpc('userGenerationRouter.getUserGenerationById',{'id':generation_id})
         if not isinstance(data,dict) or data.get('id')!=generation_id:
