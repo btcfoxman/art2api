@@ -36,6 +36,24 @@ def factory_for(responder, proxies):
 
 
 @pytest.mark.asyncio
+async def test_media_source_proxy_is_limited_to_configured_host(setup):
+    db, settings, aid = setup
+    settings.media_source_proxy = 'socks5://xray:10808'
+    settings.media_source_proxy_hosts = ('manju3.oss-cn-beijing.aliyuncs.com',)
+    proxies = []
+    with patch('app.web.client', factory_for(lambda request: httpx.Response(200), proxies)):
+        web = WebClient(aid, db, settings)
+        try:
+            fixed = web.pooled_client(media=True)
+            source = web.source_client('https://manju3.oss-cn-beijing.aliyuncs.com/input.png')
+            assert source is not fixed
+            assert web.source_client('https://other.example/input.png') is fixed
+            assert proxies == ['socks5://xray:20001', 'socks5://xray:10808']
+        finally:
+            await web.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('failed_gets', [1, 3])
 async def test_media_source_get_retries_before_any_upload(setup, failed_gets):
     db, settings, aid = setup

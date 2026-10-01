@@ -130,6 +130,7 @@ class WebClient:
         self.proxy_version = self.db.account(account_id)['proxy_version']
         self.http = None
         self.media_http = None
+        self.source_http = None
         self.media_slots = asyncio.Semaphore(12)
         self.model_lock = asyncio.Lock()
         self.model_cache = {}
@@ -153,8 +154,19 @@ class WebClient:
     async def media_client(self):
         yield self.pooled_client(media=True)
 
+    def source_client(self, url):
+        host = (urlsplit(url).hostname or '').lower()
+        if not self.settings.media_source_proxy or host not in self.settings.media_source_proxy_hosts:
+            return self.pooled_client(media=True)
+        if self.source_http is None:
+            self.source_http = client(self.settings.media_source_proxy, self.settings.request_timeout,
+                                      cookies=CookieJar(policy=NoStoredCookies()),
+                                      limits=httpx.Limits(max_connections=12, max_keepalive_connections=12,
+                                                          keepalive_expiry=60))
+        return self.source_http
+
     async def aclose(self):
-        for attr in ('http', 'media_http'):
+        for attr in ('http', 'media_http', 'source_http'):
             http = getattr(self, attr)
             if http is not None:
                 await http.aclose()
@@ -422,7 +434,7 @@ class WebClient:
                     record['download_attempts'] = attempt
                     try:
                         for _ in range(4):
-                            async with http.stream('GET', url, timeout=timeout) as response:
+                            async with self.source_client(url).stream('GET', url, timeout=timeout) as response:
                                 if response.is_redirect:
                                     url = public_media_url(urljoin(url, response.headers.get('location','')))
                                     continue

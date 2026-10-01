@@ -14,6 +14,9 @@ class Settings:
     public_base_url: str = field(default_factory=lambda: os.getenv("ART_PUBLIC_BASE_URL", "http://localhost:8797").rstrip("/"))
     mcp_url: str = "https://mcp.artlist.io/mcp"
     request_timeout: int = field(default_factory=lambda: int(os.getenv("ART_REQUEST_TIMEOUT_SECONDS", "60")))
+    media_source_proxy: str = field(default_factory=lambda: os.getenv("ART_MEDIA_SOURCE_PROXY", ""))
+    media_source_proxy_hosts: tuple[str, ...] = field(default_factory=lambda: tuple(
+        host.strip().lower() for host in os.getenv("ART_MEDIA_SOURCE_PROXY_HOSTS", "").split(",") if host.strip()))
     poll_interval: int = field(default_factory=lambda: int(os.getenv("ART_POLL_INTERVAL_SECONDS", "10")))
     task_timeout: int = field(default_factory=lambda: int(os.getenv("ART_TASK_TIMEOUT_SECONDS", "3600")))
     queue_limit: int = field(default_factory=lambda: int(os.getenv("ART_QUEUE_LIMIT", "100")))
