@@ -121,7 +121,7 @@ jobs:
               if len(services)!=1: raise SystemExit('unexpected existing art2api ingress structure')
               service_indent=lines[services[0]][:len(lines[services[0]])-len(lines[services[0]].lstrip())]
               lines[services[0]]=service_indent+'service: '+origin
-            else:
+          else:
               index=next((i for i,line in enumerate(lines) if line.strip()=='- service: http_status:404'),None)
               if index is None: raise SystemExit('cloudflared catch-all missing')
               entry_indent=lines[index][:len(lines[index])-len(lines[index].lstrip())]
