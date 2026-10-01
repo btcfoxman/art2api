@@ -25,8 +25,20 @@ class Service:
         self.clients = {}
         self.web_clients = {}
         self.jobs = {}
+        self.recovery_jobs = {}
         self.maintenance = None
         self.stopping = False
+        self.submit_gate = asyncio.Event()
+        self.submit_gate.set()
+
+    def begin_deploy_drain(self):
+        # Both this call and the transition to `submitting` run on the event
+        # loop. Once the gate is cleared, no new billable submit can begin.
+        self.submit_gate.clear()
+        return self.db.submitting_count()
+
+    def end_deploy_drain(self):
+        self.submit_gate.set()
 
     def mcp(self, account_id):
         account = self.db.account(account_id)
@@ -66,6 +78,10 @@ class Service:
         for task in self.db.tasks(active=True):
             if task['status'] == 'submitting' and not task['upstream_id']:
                 self.db.update_task(task['id'], status='submission_unknown', error='进程在提交期间重启，上游是否接受未知；不会自动重提', error_code='submission_unknown')
+                if task['profile'].get('backend') == 'web' and task['result'].get('chat_session_id'):
+                    job = asyncio.create_task(self.recover_interrupted_web_submission(task['id']))
+                    self.recovery_jobs[task['id']] = job
+                    job.add_done_callback(lambda _, task_id=task['id']: self.recovery_jobs.pop(task_id, None))
             elif task['status'] != 'submission_unknown':
                 self.schedule(task['id'])
         self.maintenance = asyncio.create_task(self.watchdog())
@@ -74,7 +90,7 @@ class Service:
         self.stopping = True
         if self.maintenance:
             self.maintenance.cancel()
-        jobs = list(self.jobs.values())
+        jobs = [*self.jobs.values(), *self.recovery_jobs.values()]
         for job in jobs:
             job.cancel()
         await asyncio.gather(*jobs, *([self.maintenance] if self.maintenance else []), return_exceptions=True)
@@ -207,6 +223,21 @@ class Service:
                 return generation_id
         return None
 
+    async def recover_interrupted_web_submission(self, task_id):
+        """Read the original session after a crash, without another submit."""
+        task = self.db.task(task_id)
+        try:
+            upstream_id = await self.reconcile_web_submission(
+                self.web(task['account_id']), task_id, task['account_id'])
+        except Exception as exc:
+            self.db.event('web_submission_reconcile_failed', type(exc).__name__, task['account_id'], task_id)
+            return
+        if upstream_id and self.db.task(task_id)['status'] == 'submission_unknown':
+            self.db.update_task(task_id, upstream_id=upstream_id, status='running', error='', error_code='')
+            self.db.event('interrupted_submission_recovered', 'Original generation ID restored',
+                          task['account_id'], task_id)
+            self.schedule(task_id)
+
     async def run(self, task_id):
         task = self.db.task(task_id)
         context_token = web_task_context.set(task_id)
@@ -223,6 +254,7 @@ class Service:
                 # Complete all safe preflight operations before recording the mutation boundary.
                 if web:
                     arguments = await self.prepare_web(web, task_id, account['id'])
+                    await self.submit_gate.wait()
                     self.db.update_task(task_id, status='submitting')
                     try:
                         upstream_id = await web.submit(arguments)
@@ -233,6 +265,7 @@ class Service:
                                           account['id'], task_id)
                             self.db.update_task(task_id, status='preparing')
                             arguments = await self.prepare_web(web, task_id, account['id'])
+                            await self.submit_gate.wait()
                             self.db.update_task(task_id, status='submitting')
                             upstream_id = await web.submit(arguments)
                         elif exc.code != 'generation_rejected':
@@ -245,6 +278,7 @@ class Service:
                     tools = await mcp.list_tools()
                     await self.oauth.access_token(account['id'])
                     arguments = build_arguments(task['request'], task['profile'], tools)
+                    await self.submit_gate.wait()
                     self.db.update_task(task_id, status='submitting')
                     data = await mcp.call(task['profile']['submit_tool'], arguments, mutating=True)
                     upstream_id = task_identity(data, task['profile'])

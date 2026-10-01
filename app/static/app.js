@@ -232,6 +232,7 @@ function previewMedia(item, anchor) {
 document.addEventListener('click', event => {
   const button = event.target.closest('[data-media-task],[data-result-task]');
   if (button) {
+    if (button.matches('a[data-result-task]')) return;
     if (button.tagName === 'A' && (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey)) return;
     event.preventDefault();
     const id = button.dataset.mediaTask || button.dataset.resultTask;

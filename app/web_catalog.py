@@ -108,6 +108,7 @@ def reference_header(request, tags):
 
 
 _DIALOGUE = re.compile(r'(?:台词|对白|配音指令)[^\r\n：:]{0,80}[：:]\s*(?:[^“「『"‘\'\r\n]{1,20}[：:]\s*)?[“「『"‘\']([^”」』"’\'\r\n]{1,200})')
+_SPOKEN_QUOTE = re.compile(r'(?:说(?:完整原句|原句|台词|对白|出)?|喊(?:出)?|念(?:出)?|讲(?:出)?)[^。！？\r\n“「『"‘\']{0,24}[：:]\s*[“「『"‘\']([^”」』"’\'\r\n]{1,200})')
 
 
 def speech_language_prompt(prompt):
@@ -130,6 +131,26 @@ def speech_language_prompt(prompt):
         else:
             continue
         labels.append((start, language))
+    # Narrative prompts often say “说完整原句：...” without the literal 台词
+    # label. Put the language and articulation instruction beside that speech
+    # cue, while leaving the requested quotation and timing untouched.
+    labeled_quotes = {match.start(1) for match in _DIALOGUE.finditer(prompt)}
+    for match in _SPOKEN_QUOTE.finditer(prompt):
+        if match.start(1) in labeled_quotes:
+            continue
+        line_prefix = prompt[prompt.rfind('\n', 0, match.start()) + 1:match.start()]
+        if any(language in line_prefix for language in ('日文', '日语', '日本語', '英文', '英语', '中文', '汉语', '普通话', '漢語')):
+            continue
+        dialogue = match.group(1)
+        if any('\u3040' <= char <= '\u30ff' for char in dialogue):
+            label = '（日语，逐字清晰）'
+        elif any('\u4e00' <= char <= '\u9fff' for char in dialogue):
+            label = '（中文普通话，逐字清晰，不翻译不改写）'
+        else:
+            continue
+        colon = max(prompt.rfind('：', match.start(), match.start(1)),
+                    prompt.rfind(':', match.start(), match.start(1)))
+        labels.append((colon, label))
     for start, language in reversed(labels):
         prompt = prompt[:start] + language + prompt[start:]
     return prompt

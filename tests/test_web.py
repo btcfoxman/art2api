@@ -142,6 +142,64 @@ def test_chinese_dialogue_language_covers_speaker_and_dubbing_labels():
                                 '台词：“Hello!”')
 
 
+def test_narrative_spoken_chinese_quote_gets_explicit_clear_mandarin_cue():
+    prompt = '陆骁粗粝、短促地说完整原句：“内门名额，归贺师兄。三十块灵石，也归贺师兄。”'
+    request = normalize_request({'model': 'doubao-seedance-2-0-260128', 'prompt': prompt})
+    _, inputs, settings, _ = quote_input(request, {})
+    expected = '陆骁粗粝、短促地说完整原句（中文普通话，逐字清晰，不翻译不改写）：“内门名额，归贺师兄。三十块灵石，也归贺师兄。”'
+    assert inputs['prompt'] == settings['prompt'] == expected
+    assert request['prompt'] == prompt
+    assert quote_input({**request, 'generate_audio': False}, {})[1]['prompt'] == prompt
+
+
+@pytest.mark.asyncio
+async def test_deployment_drain_blocks_new_billable_submit_until_released(setup):
+    db, settings, aid = setup
+    request = normalize_request({'model': MODEL, 'prompt': 'test'})
+    task, _ = db.create_task(request, [(aid, profiles()[MODEL])], 'drain-submit', 10)
+    service = Service(db, settings)
+    web = service.web(aid)
+    web.prepare = AsyncMock(return_value={'prepared': True})
+    web.submit = AsyncMock(return_value='upstream-1')
+    web.query = AsyncMock(return_value={'status': 'succeeded', 'video_url': 'https://media.example/video.mp4'})
+    assert service.begin_deploy_drain() == 0
+    job = asyncio.create_task(service.run(task['id']))
+    for _ in range(50):
+        if web.prepare.await_count:
+            break
+        await asyncio.sleep(.01)
+    assert web.prepare.await_count == 1
+    assert db.task(task['id'])['status'] == 'preparing'
+    web.submit.assert_not_awaited()
+    service.end_deploy_drain()
+    await asyncio.wait_for(job, 1)
+    web.submit.assert_awaited_once()
+    assert db.task(task['id'])['status'] == 'succeeded'
+
+
+@pytest.mark.asyncio
+async def test_interrupted_web_submit_recovers_only_original_session_generation(setup):
+    db, settings, aid = setup
+    request = normalize_request({'model': MODEL, 'prompt': 'test'})
+    task, _ = db.create_task(request, [(aid, profiles()[MODEL])], 'restart-submit', 10)
+    db.update_task(task['id'], status='submitting', result={'chat_session_id': 'unique-session'})
+    service = Service(db, settings)
+    web = service.web(aid)
+    web.generation_in_session = AsyncMock(return_value='original-generation')
+    web.submit = AsyncMock()
+    web.query = AsyncMock(return_value={'status': 'succeeded', 'video_url': 'https://media.example/video.mp4'})
+    await service.start()
+    for _ in range(100):
+        if db.task(task['id'])['status'] == 'succeeded':
+            break
+        await asyncio.sleep(.01)
+    assert db.task(task['id'])['status'] == 'succeeded'
+    assert db.task(task['id'])['upstream_id'] == 'original-generation'
+    web.generation_in_session.assert_awaited_once_with('unique-session')
+    web.submit.assert_not_awaited()
+    await service.stop()
+
+
 def test_sd25_late_audio_reference_gets_leading_index_without_losing_prompt_or_adding_unused_tags():
     original = '参考@图片2。' + '保留完整场景与镜头说明。' * 240 + '\n对白音色参考：@音频1。'
     request = normalize_request({'model': MODEL, 'prompt': original,

@@ -176,6 +176,26 @@ def create_app(settings=None):
     async def health():
         return {'status': 'ok', 'version': settings.version, 'proxy_required': True}
 
+    def deploy_control(request: Request):
+        if not request.client or request.client.host not in {'127.0.0.1', '::1'}:
+            raise HTTPException(404)
+        token = request.headers.get('X-Deploy-Token', '')
+        if not token or not hmac.compare_digest(token, settings.admin_token):
+            raise HTTPException(401)
+
+    @app.post('/internal/deploy/drain', dependencies=[Depends(deploy_control)])
+    async def begin_deploy_drain():
+        return {'submitting': service.begin_deploy_drain(), 'draining': True}
+
+    @app.get('/internal/deploy/drain', dependencies=[Depends(deploy_control)])
+    async def deploy_drain_status():
+        return {'submitting': db.submitting_count(), 'draining': not service.submit_gate.is_set()}
+
+    @app.delete('/internal/deploy/drain', dependencies=[Depends(deploy_control)])
+    async def end_deploy_drain():
+        service.end_deploy_drain()
+        return {'submitting': db.submitting_count(), 'draining': False}
+
     @app.get('/login')
     async def login_page():
         return FileResponse(static / 'login.html')

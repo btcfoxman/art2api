@@ -46,6 +46,24 @@ def test_account_concurrency_has_no_twenty_limit_and_requires_positive_integer(c
         assert app.state.db.account(aid)['max_concurrency'] == 1000000
 
 
+def test_local_deployment_drain_requires_token_and_tracks_submitting_tasks(config):
+    app = create_app(config)
+    with TestClient(app, client=('127.0.0.1', 50000)) as http:
+        path = '/internal/deploy/drain'
+        assert http.post(path).status_code == 401
+        headers = {'X-Deploy-Token': config.admin_token}
+        aid = account(app.state.db)['id']
+        request = normalize_request({'model': MODEL, 'prompt': 'sample'})
+        task, _ = app.state.db.create_task(request, [(aid, profiles()[MODEL])], 'drain-test', 100)
+        app.state.db.update_task(task['id'], status='submitting')
+        assert http.post(path, headers=headers).json() == {'submitting': 1, 'draining': True}
+        app.state.db.update_task(task['id'], status='running', upstream_id='upstream-test')
+        assert http.get(path, headers=headers).json() == {'submitting': 0, 'draining': True}
+        assert http.delete(path, headers=headers).json() == {'submitting': 0, 'draining': False}
+    with TestClient(create_app(config), client=('192.0.2.2', 50000)) as http:
+        assert http.post(path, headers=headers).status_code == 404
+
+
 def test_settings_access_validation_and_restart_persistence(config):
     original = replace(config)
     app = create_app(config)

@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: art2api-pre-production
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   IMAGE_REGISTRY: ghcr.io
@@ -84,7 +84,37 @@ jobs:
             sleep $((attempt * 10))
           done
           docker tag "${IMAGE_REF}:${IMAGE_TAG}" "${IMAGE_REF}:latest"
+          drain_mode=none
+          release_drain() {
+            if [ "$drain_mode" = api ]; then
+              docker exec "$DEPLOY_SERVICE" python -m app.deploy_control end || true
+            fi
+          }
+          trap release_drain EXIT
+          if docker exec "$DEPLOY_SERVICE" python -c "import importlib.util,sys;sys.exit(0 if importlib.util.find_spec('app.deploy_control') else 1)"; then
+            docker exec "$DEPLOY_SERVICE" python -m app.deploy_control begin
+            drain_mode=api
+            for attempt in $(seq 1 180); do
+              pending="$(docker exec "$DEPLOY_SERVICE" python -m app.deploy_control status)"
+              [[ "$pending" =~ ^[0-9]+$ ]]
+              if [ "$pending" -eq 0 ]; then break; fi
+              if [ "$attempt" -eq 180 ]; then echo 'Timed out waiting for billable submissions'; exit 1; fi
+              sleep 5
+            done
+          else
+            # The first rollout predates the drain endpoint. Wait for all
+            # pre-submit tasks to clear before replacing that old container.
+            for attempt in $(seq 1 180); do
+              pending="$(docker exec "$DEPLOY_SERVICE" python -c "import sqlite3; c=sqlite3.connect('file:/app/data/art2api.db?mode=ro',uri=True); print(c.execute(\"SELECT COUNT(*) FROM tasks WHERE status IN ('queued','preparing','submitting')\").fetchone()[0])")"
+              [[ "$pending" =~ ^[0-9]+$ ]]
+              if [ "$pending" -eq 0 ]; then break; fi
+              if [ "$attempt" -eq 180 ]; then echo 'Timed out waiting for pre-submit tasks on old image'; exit 1; fi
+              sleep 5
+            done
+          fi
           docker compose up -d "$DEPLOY_SERVICE"
+          drain_mode=none
+          trap - EXIT
           test "$env_checksum" = "$(sha256sum .env | awk '{print $1}')"
       - name: Verify local service
         run: |

@@ -236,6 +236,10 @@ class Database:
                     'succeeded': counts.get('succeeded', 0), 'failed': counts.get('failed', 0),
                     'unknown': counts.get('submission_unknown', 0)}
 
+    def submitting_count(self):
+        with self.lock:
+            return self.conn.execute("SELECT COUNT(*) FROM tasks WHERE status='submitting'").fetchone()[0]
+
     def clear_completed_tasks(self):
         # Retain task IDs, results and idempotency keys for channel queries/retries.
         # A positive status allowlist also protects unknown and future task states.
