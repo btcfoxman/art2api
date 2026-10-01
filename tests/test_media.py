@@ -167,3 +167,4 @@ async def test_square_frame_is_padded_to_requested_portrait_ratio(tmp_path):
     assert after['byteSize'] == output.stat().st_size
     assert record['policy'] == 'frame_aspect_pad'
     assert await adapt_frame_image(output, after, request) == (output, after, None)
+    assert await adapt_frame_image(original, metadata, {'aspect_ratio':'auto'}) == (original, metadata, None)

@@ -206,6 +206,8 @@ async def adapt_frame_image(path: Path, metadata, request):
     width, height = metadata.get('width', 0), metadata.get('height', 0)
     if width <= 0 or height <= 0:
         raise ValueError('首尾帧图片缺少有效尺寸')
+    if request['aspect_ratio'] == 'auto':
+        return path, metadata, None
     numerator, denominator = (int(value) for value in request['aspect_ratio'].split(':'))
     ratio = numerator / denominator
     if abs(width / height / ratio - 1) <= .01:
