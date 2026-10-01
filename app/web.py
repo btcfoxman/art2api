@@ -485,7 +485,9 @@ class WebClient:
                 if kind == 'video' and reference_request is not None:
                     with measure(record, 'transform_seconds'):
                         path, metadata, processing = await adapt_reference_video(
-                            path, metadata, reference_request, self.settings.sd25_video_policy)
+                            path, metadata, reference_request, self.settings.sd25_video_policy,
+                            has_audio=any(stream.get('codec_type') == 'audio'
+                                          for stream in media.get('streams', [])))
                 if kind == 'video' and processing is None:
                     with measure(record, 'transform_seconds'):
                         path, metadata, processing = await normalize_reference_video_codec(

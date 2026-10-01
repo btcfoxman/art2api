@@ -107,12 +107,14 @@ def reference_spec(metadata, request):
     return ratio, ratio_matches, duration_matches, resolution_matches
 
 
-async def adapt_reference_video(path: Path, metadata, request, policy):
+async def adapt_reference_video(path: Path, metadata, request, policy, *, has_audio=True):
     ratio, ratio_matches, duration_matches, resolution_matches = reference_spec(metadata, request)
-    if ratio_matches and duration_matches and resolution_matches and fps_in_range(metadata.get('fps', 0), 24, 60):
+    if (ratio_matches and duration_matches and resolution_matches
+            and fps_in_range(metadata.get('fps', 0), 24, 60) and has_audio):
         return path, metadata, None
     before = {key: metadata.get(key) for key in ('width', 'height', 'durationMs', 'fps')}
-    if policy == 'strict':
+    if (policy == 'strict' and not (ratio_matches and duration_matches and resolution_matches
+                                   and fps_in_range(metadata.get('fps', 0), 24, 60))):
         raise ValueError(f"Seedance 2.5 参考视频模式跟随素材规格：当前为 {metadata['width']}×{metadata['height']}、"
                          f"{metadata['durationMs']/1000:g} 秒，请求为 {request['aspect_ratio']}、{request['duration']} 秒；"
                          '请调整请求，或在运行设置中启用参考视频自动适配')
@@ -137,19 +139,24 @@ async def adapt_reference_video(path: Path, metadata, request, policy):
                     f'scale={width}:{height}:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,'
                     f'pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=30,'
                     'tpad=stop_mode=clone:stop_duration=1')
+    command = ['ffmpeg', '-nostdin', '-y', '-v', 'error', '-i', str(path)]
+    if not has_audio:
+        command.extend(['-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=48000'])
+    command.extend(['-map', '0:v:0', '-map', '0:a:0' if has_audio else '1:a:0',
+                    '-vf', video_filter, '-af', audio_filter, '-t', str(duration),
+                    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18',
+                    '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-threads', '2',
+                    '-movflags', '+faststart', str(output)])
     try:
-        await run_media_command('ffmpeg', '-nostdin', '-y', '-v', 'error', '-i', str(path),
-                                '-map', '0:v:0', '-map', '0:a:0?', '-vf', video_filter, '-af', audio_filter,
-                                '-t', str(duration), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18',
-                                '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-threads', '2',
-                                '-movflags', '+faststart', str(output))
+        await run_media_command(*command)
     except asyncio.TimeoutError:
         raise ValueError('参考视频转换超时') from None
     media = await probe(output)
     visual = next((s for s in media.get('streams', []) if s.get('codec_type') == 'video'), {})
+    audio = next((s for s in media.get('streams', []) if s.get('codec_type') == 'audio'), {})
     actual_duration = round(float(media.get('format', {}).get('duration', 0))*1000)
     if (visual.get('width') != width or visual.get('height') != height
-            or abs(actual_duration/1000-duration) > .25):
+            or abs(actual_duration/1000-duration) > .25 or audio.get('codec_name') != 'aac'):
         raise ValueError('参考视频转换后的规格不符合请求')
     result = {**metadata, 'fileName': output.name, 'mimeType': 'video/mp4', 'byteSize': output.stat().st_size,
               'width': width, 'height': height, 'durationMs': actual_duration, 'fps': 30.0}
@@ -158,6 +165,8 @@ async def adapt_reference_video(path: Path, metadata, request, policy):
         actions.append('缩放并加黑边匹配比例，保留完整画面')
     if not duration_matches:
         actions.append(f'整段视频与音轨同步变速至目标时长（{speed:.4f} 倍速）')
+    if not has_audio:
+        actions.append('源视频无音轨，添加静音 AAC 音轨供上游素材预处理')
     actions.append('转为 MP4 / H.264 / 30fps，参考视频短边 720px')
     record = {'policy': 'adjust', 'speed': round(speed, 6), 'before': before,
               'after': {key: result[key] for key in ('width', 'height', 'durationMs', 'fps')}, 'actions': actions}

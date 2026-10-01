@@ -85,15 +85,37 @@ async def test_video_adaptation_matches_output_spec_and_preserves_source(tmp_pat
     metadata = {'width':120, 'height':160, 'durationMs':round(source_duration*1000), 'fps':30,
                 'fileName':'source.mp4', 'mimeType':'video/mp4', 'byteSize':original.stat().st_size}
     request = {'duration':4, 'aspect_ratio':'16:9'}
-    output, after, record = await adapt_reference_video(original, metadata, request, 'adjust')
+    output, after, record = await adapt_reference_video(original, metadata, request, 'adjust',
+                                                        has_audio=with_audio)
     assert output != original and hashlib.sha256(original.read_bytes()).hexdigest() == digest
     assert (after['width'], after['height']) == (1280, 720)
     assert abs(after['durationMs']-4000) <= 250
     assert any(action in value for value in record['actions'])
     assert record['speed'] == source_duration / 4
     streams = (await probe(output))['streams']
-    assert any(s['codec_type']=='audio' for s in streams) == with_audio
+    assert any(s['codec_type']=='audio' and s['codec_name']=='aac' for s in streams)
+    assert any('静音 AAC' in value for value in record['actions']) == (not with_audio)
     assert 'fileUrl' not in str(record) and record['before']['width']==120
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not shutil.which('ffmpeg') or not shutil.which('ffprobe'), reason='ffmpeg and ffprobe required')
+async def test_compliant_reference_without_audio_gets_silent_aac(tmp_path):
+    original = tmp_path/'silent.mp4'
+    await run_media_command('ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi',
+                            '-i', 'color=c=blue:s=720x1280:r=30:d=4', '-c:v', 'libx264',
+                            '-pix_fmt', 'yuv420p', '-threads', '1', str(original))
+    metadata = {'width':720, 'height':1280, 'durationMs':4000, 'fps':30,
+                'fileName':original.name, 'mimeType':'video/mp4', 'byteSize':original.stat().st_size}
+    request = {'duration':4, 'aspect_ratio':'9:16'}
+    output, after, record = await adapt_reference_video(original, metadata, request, 'strict',
+                                                        has_audio=False)
+    assert output != original and after['byteSize'] == output.stat().st_size
+    media = await probe(output)
+    assert any(stream['codec_type']=='audio' and stream['codec_name']=='aac'
+               for stream in media['streams'])
+    assert abs(float(media['format']['duration']) - 4) <= .25
+    assert '静音 AAC' in ' '.join(record['actions'])
 
 
 @pytest.mark.asyncio
