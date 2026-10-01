@@ -18,7 +18,7 @@ def main():
     )
     with urlopen(request, timeout=10) as response:
         data = json.load(response)
-    if data['draining'] != (sys.argv[1] != 'end'):
+    if sys.argv[1] != 'status' and data['draining'] != (sys.argv[1] == 'begin'):
         raise RuntimeError('unexpected deployment drain state')
     print(int(data['submitting']))
 
