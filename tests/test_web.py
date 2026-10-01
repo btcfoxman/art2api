@@ -214,7 +214,7 @@ def test_start_end_frames_are_not_silently_merged_into_references():
 
 
 @pytest.mark.asyncio
-async def test_sd25_upload_adapts_start_and_end_frames_to_requested_ratio(setup):
+async def test_sd25_upload_preserves_start_and_end_frame_dimensions(setup):
     db, settings, aid = setup
     request = normalize_request({'model':MODEL,'prompt':'move naturally','duration':4,
                                  'aspect_ratio':'9:16','first_frame':'https://media.example/start.jpg',
@@ -224,13 +224,16 @@ async def test_sd25_upload_adapts_start_and_end_frames_to_requested_ratio(setup)
     web.upload = AsyncMock(side_effect=lambda url, kind, **options: {
         'file_key':url.rsplit('/', 1)[-1], 'file_url':url,
         'metadata':{'fileName':'frame.png','mimeType':'image/png','byteSize':100,
-                    'width':720,'height':1280}})
+                    'width':1024,'height':1024}})
     assets = await web._prepare_media(task, {})
     assert len(web.upload.await_args_list) == 2
-    assert all(call.kwargs == {'reference_request':request}
+    assert all(call.kwargs == {}
                for call in web.upload.await_args_list)
     assert all(call.args[1] == 'image' for call in web.upload.await_args_list)
     assert len(assets['first_frame']) == len(assets['last_frame']) == 1
+    assert all(assets[field][0]['metadata']['width'] == 1024
+               for field in ('first_frame', 'last_frame'))
+    assert quote_input(request, assets)[2]['aspect_ratio'] == 'auto'
 
 
 def test_verified_task_tokens_are_encrypted_bound_and_single_use(setup):
@@ -546,6 +549,28 @@ async def test_web_restart_queries_original_id_without_token_or_new_submit(setup
     web.query.assert_awaited_once_with('generation-1')
     web.prepare.assert_not_awaited()
     web.submit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_completed_lower_resolution_output_is_returned_with_warning(setup):
+    db, settings, aid = setup
+    request = normalize_request({'model': 'doubao-seedance-2-0-260128', 'prompt': 'wide scene',
+                                 'resolution': '720p', 'aspect_ratio': '21:9', 'duration': 5})
+    task, _ = db.create_task(request, [(aid, profiles()[request['model']])], 'wide-output', 10)
+    db.update_task(task['id'], status='running', upstream_id='generation-wide')
+    service = Service(db, settings)
+    web = AsyncMock()
+    web.query.return_value = {'status': 'succeeded', 'video_url': 'https://media.example/wide.mp4',
+                              'output_id': 'output-wide', 'metadata': json.dumps({
+                                  'dimensions': {'width': 1470, 'height': 630}, 'requiresUpscale': True})}
+    service.web = lambda _: web
+    await service.run(task['id'])
+    stored = db.task(task['id'])
+    assert stored['status'] == 'succeeded'
+    assert stored['result']['video_url'] == 'https://media.example/wide.mp4'
+    assert stored['result']['quality_warning']['actual_dimensions'] == {'width': 1470, 'height': 630}
+    assert service.public_task(stored)['warnings'][0]['code'] == 'output_resolution_below_requested'
+    web.query.assert_awaited_once_with('generation-wide')
 
 
 @pytest.mark.asyncio

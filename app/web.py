@@ -21,7 +21,7 @@ from jsonschema import Draft202012Validator, ValidationError
 from app.catalog import local_schema
 from app.cookies import parse_cookie_header
 from app.errors import GatewayError
-from app.media import adapt_frame_image, adapt_reference_video, append_audio_silence, audio_silence_plan, fps_in_range, normalize_reference_video_codec, probe
+from app.media import adapt_reference_video, append_audio_silence, audio_silence_plan, fps_in_range, normalize_reference_video_codec, probe
 from app.network import client, public_media_url
 from app.web_catalog import GROUPS, reference_header, generation_payload, generation_result, profiles, quote_input, reference_prompt, validate_request
 
@@ -221,6 +221,12 @@ class WebClient:
             self.db.update_account(self.account_id, enabled=False, status='unauthorized', last_error='网页登录已失效，请重新登录')
             raise GatewayError('Artlist 网页登录已失效', 'reauthorization_required', 401)
         if response.status_code in {400, 403}:
+            explicit_no_generation = False
+            if response.status_code == 403 and path == '/api/trpc/userGenerationRouter.createUserGeneration':
+                try:
+                    explicit_no_generation = response.json() == {'success': False}
+                except ValueError:
+                    pass
             self.db.update_credentials(self.account_id, {'web_last_rejection': {
                 'procedure': path.rsplit('/',1)[-1], 'status': response.status_code,
                 'task_id': web_task_context.get(), 'received_at': time.time(),
@@ -234,7 +240,7 @@ class WebClient:
             message = f'Artlist 拒绝网页协议请求（HTTP {response.status_code}，{reason}，{path.rsplit("/",1)[-1]}）'
             self.db.update_account(self.account_id, last_error=message)
             self.db.event('web_request_rejected', message, self.account_id, web_task_context.get())
-            raise GatewayError(message, 'generation_rejected', 422)
+            raise GatewayError(message, 'generation_rejected', 422, retryable=explicit_no_generation)
         if response.status_code >= 500:
             raise GatewayError('Artlist 网页上游服务异常', 'web_upstream_error', 502, retryable=True)
         if response.status_code >= 400:
@@ -484,10 +490,6 @@ class WebClient:
                     with measure(record, 'transform_seconds'):
                         path, metadata, processing = await normalize_reference_video_codec(
                             path, metadata, visual.get('codec_name'))
-                if kind == 'image' and reference_request is not None:
-                    with measure(record, 'transform_seconds'):
-                        path, metadata, processing = await adapt_frame_image(
-                            path, metadata, reference_request)
                 if kind == 'audio' and silence_seconds:
                     with measure(record, 'transform_seconds'):
                         path, metadata, processing = await append_audio_silence(path, metadata, silence_seconds)
@@ -621,7 +623,7 @@ class WebClient:
             urls=request.get(field) or []
             if isinstance(urls,str):urls=[urls]
             options = ({'reference_request': request}
-                       if field in {'video_urls', 'first_frame', 'last_frame'}
+                       if field == 'video_urls'
                        and task['profile']['group_id'] == 515 else {})
             assets[field] = [None] * len(urls)
             uploads.extend(schedule_upload(field, index, url, kind, options) for index, url in enumerate(urls))

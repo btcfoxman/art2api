@@ -174,6 +174,21 @@ class Service:
             self.schedule(task['id'])
         return self.public_task(task)
 
+    async def prepare_web(self, web, task_id, account_id):
+        # Media preparation is read/upload only. A failed source download has
+        # not crossed the billable generation boundary, so retry the preflight.
+        for attempt in range(1, 4):
+            try:
+                return await web.prepare(self.db.task(task_id))
+            except GatewayError as exc:
+                if exc.code != 'media_download_failed' or not exc.retryable or attempt == 3:
+                    raise
+                delay = 10 * attempt
+                self.db.event('media_preparation_retry',
+                              f'Source download exhausted; retrying preparation {attempt}/2 after {delay}s',
+                              account_id, task_id)
+                await asyncio.sleep(delay)
+
     async def run(self, task_id):
         task = self.db.task(task_id)
         context_token = web_task_context.set(task_id)
@@ -189,9 +204,22 @@ class Service:
                 self.db.update_task(task_id, status='preparing')
                 # Complete all safe preflight operations before recording the mutation boundary.
                 if web:
-                    arguments = await web.prepare(task)
+                    arguments = await self.prepare_web(web, task_id, account['id'])
                     self.db.update_task(task_id, status='submitting')
-                    upstream_id = await web.submit(arguments)
+                    try:
+                        upstream_id = await web.submit(arguments)
+                    except GatewayError as exc:
+                        if exc.code != 'generation_rejected' or not exc.retryable:
+                            raise
+                        # A 403 with exactly {"success": false} explicitly confirms
+                        # that no generation was created. Refresh verification and
+                        # the cost signature once; never repeat an unknown submit.
+                        self.db.event('web_submission_retry', 'Explicit 403 rejection; refreshing verification and quote once',
+                                      account['id'], task_id)
+                        self.db.update_task(task_id, status='preparing')
+                        arguments = await self.prepare_web(web, task_id, account['id'])
+                        self.db.update_task(task_id, status='submitting')
+                        upstream_id = await web.submit(arguments)
                 else:
                     tools = await mcp.list_tools()
                     await self.oauth.access_token(account['id'])
@@ -218,14 +246,24 @@ class Service:
                         status, url = task_result(data, task['profile'])
                     failures = 0
                     if status == 'succeeded':
+                        quality_warning = None
                         if web and data.get('metadata'):
                             metadata = json.loads(data['metadata']) if isinstance(data['metadata'],str) else data['metadata']
                             dimensions = metadata.get('dimensions',{})
                             expected = {'480p':480,'720p':720,'1080p':1080,'4k':2160}.get(task['request']['resolution'],0)
                             actual = min(dimensions.get('width',0),dimensions.get('height',0))
                             if actual and actual+16<expected:
-                                raise GatewayError('结果分辨率低于请求，等待上游高清输出', 'output_pending', retryable=True)
-                        self.db.update_task(task_id, status=status, result={**self.db.task(task_id)['result'], 'video_url': url, **({'output_id':data.get('output_id'),'metadata':data.get('metadata')} if web else {})}, error='', error_code='')
+                                # Artlist marks these completed outputs as requiring a separate
+                                # upscale. Keep the available video instead of polling forever.
+                                quality_warning = {
+                                    'code': 'output_resolution_below_requested',
+                                    'requested_resolution': task['request']['resolution'],
+                                    'actual_dimensions': dimensions,
+                                    'message': f'上游实际输出 {dimensions["width"]}×{dimensions["height"]}，低于请求的 {task["request"]["resolution"]}',
+                                }
+                        self.db.update_task(task_id, status=status, result={**self.db.task(task_id)['result'], 'video_url': url,
+                            **({'output_id':data.get('output_id'),'metadata':data.get('metadata')} if web else {}),
+                            **({'quality_warning':quality_warning} if quality_warning else {})}, error='', error_code='')
                         self.db.event('task_succeeded', 'Video result ready', account['id'], task_id)
                         return
                     if status == 'failed':
@@ -307,6 +345,7 @@ class Service:
         status = 'failed' if task['status'] == 'submission_unknown' else task['status']
         return {'id': task['id'], 'object': 'video', 'status': status, 'model': task['request']['model'],
                 **({key: result[key] for key in ('media_processing', 'prompt_processing', 'preparation_timing') if result.get(key)} if internal else {}),
+                **({'warnings': [result['quality_warning']]} if result.get('quality_warning') else {}),
                 'progress': 100 if status in {'succeeded', 'failed'} else 10 if status == 'queued' else 30,
                 'created_at': task['created_at'], 'updated_at': task['updated_at'],
                 'content': {'video_url': url} if url else {}, 'data': [{'url': url, 'type': 'video'}] if url else [],

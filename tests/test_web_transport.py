@@ -225,6 +225,55 @@ async def test_http_rejections_and_local_protocol_errors_are_not_transport_retri
 
 
 @pytest.mark.asyncio
+async def test_explicit_false_submit_403_allows_one_fresh_preflight(setup):
+    db, settings, aid = setup
+    web = WebClient(aid, db, settings)
+    proxies = []
+    with patch('app.web.client', factory_for(lambda request: httpx.Response(403, json={'success': False}), proxies)):
+        with pytest.raises(GatewayError) as error:
+            await web.rpc('userGenerationRouter.createUserGeneration', {'test': True}, post=True)
+    assert error.value.code == 'generation_rejected' and error.value.retryable
+    assert len(proxies) == 1
+
+    service = Service(db, settings)
+    web = AsyncMock()
+    web.prepare.side_effect = [{'attempt': 1}, {'attempt': 2}]
+    web.submit.side_effect = [GatewayError('explicit false 403', 'generation_rejected', 422, retryable=True),
+                              'generation-after-refresh']
+    web.query.return_value = {'status': 'succeeded', 'video_url': 'https://media.example/result.mp4'}
+    service.web = lambda _: web
+    task = await service.create({'model': 'sd-2-5-480p', 'prompt': 'test'}, 'explicit-403-once')
+    await asyncio.gather(*list(service.jobs.values()))
+    assert db.task(task['id'])['status'] == 'succeeded'
+    assert web.prepare.await_count == web.submit.await_count == 2
+    assert web.submit.await_args_list[0].args == ({'attempt': 1},)
+    assert web.submit.await_args_list[1].args == ({'attempt': 2},)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failures', [1, 3])
+async def test_media_download_failure_retries_only_before_submission(setup, failures):
+    db, settings, aid = setup
+    service = Service(db, settings)
+    web = AsyncMock()
+    web.prepare.side_effect = [GatewayError('source connect timeout', 'media_download_failed',
+                                            502, retryable=True)] * failures + [{'prepared': True}]
+    web.submit.return_value = 'generation-after-download'
+    web.query.return_value = {'status': 'succeeded', 'video_url': 'https://media.example/result.mp4'}
+    service.web = lambda _: web
+    with patch('app.service.asyncio.sleep', new_callable=AsyncMock) as sleep:
+        task = await service.create({'model': 'sd-2-5-480p', 'prompt': 'test'}, f'download-{failures}')
+        await asyncio.gather(*list(service.jobs.values()))
+    stored = db.task(task['id'])
+    assert stored['status'] == ('succeeded' if failures == 1 else 'failed')
+    assert stored['error_code'] == ('' if failures == 1 else 'media_download_failed')
+    assert web.prepare.await_count == (2 if failures == 1 else 3)
+    assert web.submit.await_count == (1 if failures == 1 else 0)
+    assert len([e for e in db.events() if e['kind'] == 'media_preparation_retry']) == min(failures, 2)
+    assert sleep.await_count >= min(failures, 2)
+
+
+@pytest.mark.asyncio
 async def test_retry_stops_when_proxy_binding_changes(setup):
     db, settings, aid = setup
     proxies = []
