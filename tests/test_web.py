@@ -150,6 +150,8 @@ def test_narrative_spoken_chinese_quote_gets_explicit_clear_mandarin_cue():
     assert inputs['prompt'] == settings['prompt'] == expected
     assert request['prompt'] == prompt
     assert quote_input({**request, 'generate_audio': False}, {})[1]['prompt'] == prompt
+    explicit = '角色说日语：“你好。”'
+    assert quote_input({**request, 'prompt': explicit}, {})[1]['prompt'] == explicit
 
 
 @pytest.mark.asyncio

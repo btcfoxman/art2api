@@ -138,7 +138,7 @@ def speech_language_prompt(prompt):
     for match in _SPOKEN_QUOTE.finditer(prompt):
         if match.start(1) in labeled_quotes:
             continue
-        line_prefix = prompt[prompt.rfind('\n', 0, match.start()) + 1:match.start()]
+        line_prefix = prompt[prompt.rfind('\n', 0, match.start()) + 1:match.start(1)]
         if any(language in line_prefix for language in ('日文', '日语', '日本語', '英文', '英语', '中文', '汉语', '普通话', '漢語')):
             continue
         dialogue = match.group(1)
