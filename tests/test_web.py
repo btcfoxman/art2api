@@ -202,6 +202,21 @@ async def test_interrupted_web_submit_recovers_only_original_session_generation(
     await service.stop()
 
 
+@pytest.mark.asyncio
+async def test_manual_web_recovery_rejects_invalid_generation_id_before_binding(setup):
+    db, settings, aid = setup
+    request = normalize_request({'model': MODEL, 'prompt': 'test'})
+    task, _ = db.create_task(request, [(aid, profiles()[MODEL])], 'invalid-recovery-id', 10)
+    db.update_task(task['id'], status='submission_unknown')
+    service = Service(db, settings)
+    with pytest.raises(ValueError, match='UUID'):
+        await service.recover_unknown(task['id'], '11')
+    stored = db.task(task['id'])
+    assert stored['status'] == 'submission_unknown'
+    assert stored['upstream_id'] == ''
+    assert not service.jobs
+
+
 def test_sd25_late_audio_reference_gets_leading_index_without_losing_prompt_or_adding_unused_tags():
     original = '参考@图片2。' + '保留完整场景与镜头说明。' * 240 + '\n对白音色参考：@音频1。'
     request = normalize_request({'model': MODEL, 'prompt': original,

@@ -4,6 +4,7 @@ import asyncio
 import ipaddress
 import json
 import time
+from uuid import UUID
 
 from app.browser import BrowserManager
 from app.catalog import (PUBLIC_MODELS, build_arguments, local_schema, normalize_request, query_arguments,
@@ -363,6 +364,13 @@ class Service:
             raise ValueError('只可恢复结果未知且已停止本地查询的任务')
         if not upstream_id:
             raise ValueError('必须提供该账号真实的 Artlist generation ID')
+        if task['profile'].get('backend') == 'web':
+            try:
+                canonical_id = str(UUID(upstream_id))
+            except (ValueError, AttributeError, TypeError):
+                raise ValueError('Artlist generation ID 必须是标准 UUID') from None
+            if upstream_id != canonical_id:
+                raise ValueError('Artlist generation ID 必须是标准 UUID')
         if task['upstream_id'] and task['upstream_id'] != upstream_id:
             raise ValueError('恢复查询不能更换已绑定的 Artlist generation ID')
         self.db.update_task(task_id, upstream_id=upstream_id, status='running', error='', error_code='', query_deadline=time.time() + self.settings.task_timeout)
