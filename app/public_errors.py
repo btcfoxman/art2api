@@ -100,7 +100,7 @@ def public_message(code='', message='', upstream_code=''):
         'input_url_unreachable', '素材下载', '素材地址', '素材不可读取', '无法读取参考素材', 'for url',
     )):
         return MEDIA_DOWNLOAD
-    if code == 'media_upload_failed':
+    if code in {'media_upload_failed', 'media_read_check_failed'}:
         return MEDIA_UPLOAD
     if any(word in text for word in ('素材格式', '帧率', '图片尺寸', '素材转换失败', '素材信息解析',
                                      '不支持 image_urls', '不支持 video_urls', '不支持 audio_urls')):

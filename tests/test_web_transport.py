@@ -103,6 +103,45 @@ async def test_media_source_get_retries_before_any_upload(setup, failed_gets):
 
 
 @pytest.mark.asyncio
+async def test_signed_media_read_check_retries_without_reupload(setup):
+    db, settings, aid = setup
+    stored = 'https://artlist-prod-ai-toolkit-custom-user-uploads.s3.eu-central-1.amazonaws.com/object'
+    calls = []
+
+    def responder(request):
+        calls.append((request.method, request.url.host))
+        if request.url.host == 'media.example':
+            return httpx.Response(200, content=b'image-content', headers={'content-type': 'image/png'})
+        if request.url.host == 'toolkit.artlist.io':
+            name = request.url.path.rsplit('/', 1)[-1]
+            value = ({'presignedUrl': stored+'?X-Amz-Signature=upload&x-id=PutObject', 'fileKey': 'object'}
+                     if name == 'uploadRouter.getPresignedUrl' else
+                     {'presignedUrl': stored+'?X-Amz-Signature=download&x-id=GetObject'})
+            return httpx.Response(200, json={'result': {'data': {'json': value}}})
+        if request.method == 'PUT':
+            return httpx.Response(200)
+        if sum(method == 'GET' and host == request.url.host for method, host in calls) == 1:
+            raise httpx.RemoteProtocolError('Server disconnected without sending a response.', request=request)
+        return httpx.Response(206, content=b'x')
+
+    with (patch('app.web.client', factory_for(responder, [])),
+          patch('app.web.probe', AsyncMock(return_value={
+              'streams': [{'codec_type': 'video', 'width': 1280, 'height': 720}]})),
+          patch('app.web.asyncio.sleep', new_callable=AsyncMock) as sleep):
+        web = WebClient(aid, db, settings)
+        try:
+            result = await web.upload('https://media.example/input.png', 'image')
+        finally:
+            await web.aclose()
+    assert result['file_key'] == 'object'
+    assert sum(method == 'PUT' for method, _ in calls) == 1
+    assert sum(method == 'GET' and host == 'artlist-prod-ai-toolkit-custom-user-uploads.s3.eu-central-1.amazonaws.com'
+               for method, host in calls) == 2
+    assert len([e for e in db.events() if e['kind'] == 'media_read_check_retry']) == 1
+    sleep.assert_awaited_once_with(1)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('failed_puts', [1, 3])
 async def test_media_upload_retries_only_the_same_presigned_put(setup, failed_puts):
     db, settings, aid = setup
@@ -270,21 +309,22 @@ async def test_explicit_false_submit_403_allows_one_fresh_preflight(setup):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('failures', [1, 3])
-async def test_media_download_failure_retries_only_before_submission(setup, failures):
+@pytest.mark.parametrize('code', ['media_download_failed', 'media_read_check_failed'])
+async def test_media_preflight_failure_retries_only_before_submission(setup, failures, code):
     db, settings, aid = setup
     service = Service(db, settings)
     web = AsyncMock()
-    web.prepare.side_effect = [GatewayError('source connect timeout', 'media_download_failed',
+    web.prepare.side_effect = [GatewayError('media preflight connect timeout', code,
                                             502, retryable=True)] * failures + [{'prepared': True}]
     web.submit.return_value = 'generation-after-download'
     web.query.return_value = {'status': 'succeeded', 'video_url': 'https://media.example/result.mp4'}
     service.web = lambda _: web
     with patch('app.service.asyncio.sleep', new_callable=AsyncMock) as sleep:
-        task = await service.create({'model': 'sd-2-5-480p', 'prompt': 'test'}, f'download-{failures}')
+        task = await service.create({'model': 'sd-2-5-480p', 'prompt': 'test'}, f'{code}-{failures}')
         await asyncio.gather(*list(service.jobs.values()))
     stored = db.task(task['id'])
     assert stored['status'] == ('succeeded' if failures == 1 else 'failed')
-    assert stored['error_code'] == ('' if failures == 1 else 'media_download_failed')
+    assert stored['error_code'] == ('' if failures == 1 else code)
     assert web.prepare.await_count == (2 if failures == 1 else 3)
     assert web.submit.await_count == (1 if failures == 1 else 0)
     assert len([e for e in db.events() if e['kind'] == 'media_preparation_retry']) == min(failures, 2)

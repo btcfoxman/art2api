@@ -552,18 +552,30 @@ class WebClient:
                 raise GatewayError('Artlist 未返回对应素材的有效下载签名', 'media_signature_invalid', 422)
             # Verify access without Artlist session headers before any billable
             # generation; a signed GET must not be tested with unsigned HEAD.
-            with measure(record, 'read_check_seconds'):
-                async with http.stream('GET',readable,headers={'Range':'bytes=0-0'},timeout=timeout) as access:
-                    if access.status_code not in {200,206}:
-                        raise GatewayError(f'Artlist 上传素材不可读取（HTTP {access.status_code}）', 'media_unreachable', 422)
-                    # Consume a genuine one-byte range so HTTP/1.1 can reuse its
-                    # connection; never download the whole object for HTTP 200.
-                    if access.status_code == 206:
-                        received = 0
-                        async for chunk in access.aiter_bytes():
-                            received += len(chunk)
-                            if received > 1:
-                                break
+            for attempt in range(1, 4):
+                try:
+                    with measure(record, 'read_check_seconds'):
+                        async with http.stream('GET',readable,headers={'Range':'bytes=0-0'},timeout=timeout) as access:
+                            if access.status_code not in {200,206}:
+                                raise GatewayError(f'Artlist 上传素材不可读取（HTTP {access.status_code}）', 'media_unreachable', 422)
+                            # Consume a genuine one-byte range so HTTP/1.1 can reuse its
+                            # connection; never download the whole object for HTTP 200.
+                            if access.status_code == 206:
+                                received = 0
+                                async for chunk in access.aiter_bytes():
+                                    received += len(chunk)
+                                    if received > 1:
+                                        break
+                except TRANSIENT_TRANSPORT_ERRORS as exc:
+                    if attempt == 3:
+                        raise GatewayError(f'Artlist 上传素材读取验证中断（{type(exc).__name__}；已尝试 3 次）',
+                                           'media_read_check_failed', 502, retryable=True) from None
+                    self.db.event('media_read_check_retry',
+                                  f'{kind} signed GET transient {type(exc).__name__}; attempt {attempt}/3',
+                                  self.account_id, web_task_context.get())
+                    await asyncio.sleep(attempt)
+                else:
+                    break
             return {'file_key':signed['fileKey'],'file_url':readable,'metadata':metadata,
                     **({'processing': processing} if processing else {})}
 

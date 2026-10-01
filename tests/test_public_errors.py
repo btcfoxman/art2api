@@ -62,6 +62,7 @@ def assert_public(response, status, message=None):
     ('validation_error', '素材必须使用公网 HTTPS URL', '', MEDIA_EXTERNAL),
     ('media_unreachable', 'Artlist 上传素材不可读取', '', MEDIA_DOWNLOAD),
     ('media_download_failed', 'private download URL', '', MEDIA_DOWNLOAD),
+    ('media_read_check_failed', PRIVATE, '', MEDIA_UPLOAD),
     ('submission_unknown', 'INSUFFICIENT_CREDITS', '', QUEUE_INTERRUPTED),
     ('upstream_outcome_unknown', 'Artlist deadline exceeded', '', QUEUE_INTERRUPTED),
     ('generation_failed', 'temporarily unavailable', 'SERVICE_UNDER_MAINTENANCE', UPSTREAM_MAINTENANCE),

@@ -192,17 +192,17 @@ class Service:
         return self.public_task(task)
 
     async def prepare_web(self, web, task_id, account_id):
-        # Media preparation is read/upload only. A failed source download has
-        # not crossed the billable generation boundary, so retry the preflight.
+        # Media preparation is read/upload only. A failed source download or
+        # signed-object read check has not crossed the billable generation boundary.
         for attempt in range(1, 4):
             try:
                 return await web.prepare(self.db.task(task_id))
             except GatewayError as exc:
-                if exc.code != 'media_download_failed' or not exc.retryable or attempt == 3:
+                if exc.code not in {'media_download_failed', 'media_read_check_failed'} or not exc.retryable or attempt == 3:
                     raise
                 delay = 10 * attempt
                 self.db.event('media_preparation_retry',
-                              f'Source download exhausted; retrying preparation {attempt}/2 after {delay}s',
+                              f'Media preflight exhausted; retrying preparation {attempt}/2 after {delay}s',
                               account_id, task_id)
                 await asyncio.sleep(delay)
 
