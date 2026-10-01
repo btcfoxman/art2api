@@ -13,7 +13,7 @@ from app.public_errors import (
     PUBLIC_MESSAGES, public_error, public_message, QUEUE_LIMIT, QUEUE_INTERRUPTED, CONTENT_POLICY,
     OUTPUT_VIDEO_POLICY, INPUT_PERSON, REFERENCE_PERSON, TEXT_POLICY, IMAGE_POLICY,
     VIDEO_POLICY, MEDIA_DURATION, MEDIA_LIMIT, MEDIA_FORMAT, MEDIA_DOWNLOAD, MEDIA_UPLOAD,
-    MEDIA_EXTERNAL, GENERATION_FAILED, UPSTREAM_MAINTENANCE, CANCELLED_BY_USER,
+    MEDIA_EXTERNAL, REFERENCE_MEDIA_FAILED, GENERATION_FAILED, UPSTREAM_MAINTENANCE, CANCELLED_BY_USER,
 )
 from app.web_catalog import generation_result, profiles
 
@@ -55,6 +55,7 @@ def assert_public(response, status, message=None):
     ('generation_failed', 'OutputVideoSensitiveContentDetected copyright', 'PROVIDER_CONTENT_SAFETY_VIOLATION', OUTPUT_VIDEO_POLICY),
     ('generation_failed', 'InputTextSensitiveContentDetected', 'PROVIDER_CONTENT_SAFETY_VIOLATION', TEXT_POLICY),
     ('generation_failed', 'InputImageSensitiveContentDetected', 'FILE_OPTIMIZATION_FAILED', IMAGE_POLICY),
+    ('generation_failed', 'Artlist reference material preprocessing failed', 'FILE_OPTIMIZATION_FAILED', REFERENCE_MEDIA_FAILED),
     ('validation_error', 'Artlist 素材总时长超限：audio_urls', '', MEDIA_DURATION),
     ('validation_error', 'Artlist 网页模型 image_urls 数量超限', '', MEDIA_LIMIT),
     ('validation_error', 'Artlist 素材格式不受支持：WAV', '', MEDIA_FORMAT),
@@ -82,7 +83,7 @@ def test_new_upstream_failures_store_safe_category_without_raw_reason():
     assert 'private-token' not in json.dumps(result)
     maintenance = generation_result({'status':'Failed', 'errorCode':'SERVICE_MAINTENANCE', 'reason':PRIVATE})
     assert maintenance['public_error_message'] == UPSTREAM_MAINTENANCE
-    assert len(PUBLIC_MESSAGES) == 23
+    assert len(PUBLIC_MESSAGES) == 24
     assert public_message('media_upload_failed', 'Artlist 素材上传连接中断') == MEDIA_UPLOAD
     for literal in PUBLIC_MESSAGES:
         assert public_message('generation_failed', literal) == literal

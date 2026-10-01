@@ -24,13 +24,15 @@ MEDIA_FORMAT = '素材格式不支持，请修改后再试~'
 MEDIA_DOWNLOAD = '素材下载失败，请检查素材链接后重试~'
 MEDIA_UPLOAD = '参考素材上传连接中断，请稍后重试~'
 MEDIA_EXTERNAL = '素材仅支持外链，暂不支持文件流/Base64等~'
+REFERENCE_MEDIA_FAILED = '上游无法处理参考素材，请更换参考素材后重试，积分已返还~'
 GENERATION_FAILED = '生成失败，积分已返还，请重试~'
 
 PUBLIC_MESSAGES = frozenset({
     QUEUE_LIMIT, CONTENT_POLICY, REFERENCE_PERSON, INPUT_PERSON, OUTPUT_VIDEO_POLICY,
     TEXT_RETRY, VIDEO_RETRY, TEXT_EDIT, VIDEO_POLICY, IMAGE_POLICY, CONTENT_RETRY,
     IMAGE_EDIT, TEXT_POLICY, QUEUE_INTERRUPTED, MEDIA_DURATION, MEDIA_LIMIT,
-    MEDIA_FORMAT, MEDIA_DOWNLOAD, MEDIA_UPLOAD, MEDIA_EXTERNAL, GENERATION_FAILED, UPSTREAM_MAINTENANCE,
+    MEDIA_FORMAT, MEDIA_DOWNLOAD, MEDIA_UPLOAD, MEDIA_EXTERNAL, REFERENCE_MEDIA_FAILED,
+    GENERATION_FAILED, UPSTREAM_MAINTENANCE,
     CANCELLED_BY_USER,
 })
 
@@ -82,6 +84,8 @@ def public_message(code='', message='', upstream_code=''):
         if any(word in text for word in ('inputvideo', 'input video', 'reference video', '视频')):
             return VIDEO_POLICY
         return CONTENT_POLICY
+    if str(upstream_code).upper() == 'FILE_OPTIMIZATION_FAILED':
+        return REFERENCE_MEDIA_FAILED
     if any(word in text for word in ('时长', 'duration')):
         return MEDIA_DURATION
     if any(word in text for word in ('素材数量', '素材总数', '素材总量', '素材文件大小', '素材大小', '素材总限制',
