@@ -10,10 +10,10 @@ from app.config import Settings
 from app.errors import GatewayError
 from app.main import create_app
 from app.public_errors import (
-    PUBLIC_MESSAGES, public_message, QUEUE_LIMIT, QUEUE_INTERRUPTED, CONTENT_POLICY,
+    PUBLIC_MESSAGES, public_error, public_message, QUEUE_LIMIT, QUEUE_INTERRUPTED, CONTENT_POLICY,
     OUTPUT_VIDEO_POLICY, INPUT_PERSON, REFERENCE_PERSON, TEXT_POLICY, IMAGE_POLICY,
     VIDEO_POLICY, MEDIA_DURATION, MEDIA_LIMIT, MEDIA_FORMAT, MEDIA_DOWNLOAD, MEDIA_UPLOAD,
-    MEDIA_EXTERNAL, GENERATION_FAILED, UPSTREAM_MAINTENANCE,
+    MEDIA_EXTERNAL, GENERATION_FAILED, UPSTREAM_MAINTENANCE, CANCELLED_BY_USER,
 )
 from app.web_catalog import generation_result, profiles
 
@@ -66,19 +66,22 @@ def assert_public(response, status, message=None):
     ('upstream_maintenance', 'Artlist 正在维护', '', UPSTREAM_MAINTENANCE),
     ('web_upstream_error', 'Artlist 网页上游服务异常', '', QUEUE_INTERRUPTED),
     ('submission_unknown', 'Artlist under maintenance', 'SERVICE_MAINTENANCE', QUEUE_INTERRUPTED),
+    ('cancelled_by_user', PRIVATE, '', CANCELLED_BY_USER),
 ])
 def test_actual_failure_categories_choose_only_approved_literals(code, diagnostic, upstream, expected):
     assert public_message(code, diagnostic+' '+PRIVATE, upstream) == expected
 
 
 def test_new_upstream_failures_store_safe_category_without_raw_reason():
+    assert public_error('cancelled_by_user', PRIVATE) == {
+        'code': 'cancelled_by_user', 'message': CANCELLED_BY_USER}
     result = generation_result({'status':'Failed', 'errorCode':'FILE_OPTIMIZATION_FAILED',
                                 'reason':'InputImage real person '+PRIVATE})
     assert result['public_error_message'] == INPUT_PERSON
     assert 'private-token' not in json.dumps(result)
     maintenance = generation_result({'status':'Failed', 'errorCode':'SERVICE_MAINTENANCE', 'reason':PRIVATE})
     assert maintenance['public_error_message'] == UPSTREAM_MAINTENANCE
-    assert len(PUBLIC_MESSAGES) == 22
+    assert len(PUBLIC_MESSAGES) == 23
     assert public_message('media_upload_failed', 'Artlist 素材上传连接中断') == MEDIA_UPLOAD
     for literal in PUBLIC_MESSAGES:
         assert public_message('generation_failed', literal) == literal

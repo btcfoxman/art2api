@@ -17,6 +17,7 @@ CONTENT_RETRY = '检测到内容有敏感或违规情况，积分已返还，请
 IMAGE_EDIT = '图片违规，请修改后重试~'
 TEXT_POLICY = '检测到文本有敏感或违规内容，积分已返还，请重试~'
 QUEUE_INTERRUPTED = '队列排队服务中断，请稍后再试~'
+CANCELLED_BY_USER = '任务已按请求结束，未继续等待上游结果~'
 MEDIA_DURATION = '素材时长不支持，请修改后再试~'
 MEDIA_LIMIT = '素材超限，请修改后再试~'
 MEDIA_FORMAT = '素材格式不支持，请修改后再试~'
@@ -30,6 +31,7 @@ PUBLIC_MESSAGES = frozenset({
     TEXT_RETRY, VIDEO_RETRY, TEXT_EDIT, VIDEO_POLICY, IMAGE_POLICY, CONTENT_RETRY,
     IMAGE_EDIT, TEXT_POLICY, QUEUE_INTERRUPTED, MEDIA_DURATION, MEDIA_LIMIT,
     MEDIA_FORMAT, MEDIA_DOWNLOAD, MEDIA_UPLOAD, MEDIA_EXTERNAL, GENERATION_FAILED, UPSTREAM_MAINTENANCE,
+    CANCELLED_BY_USER,
 })
 
 # These generic codes carry routing/idempotency semantics. Never echo arbitrary
@@ -39,10 +41,13 @@ PUBLIC_CODES = frozenset({
     'upstream_outcome_unknown', 'idempotency_conflict', 'validation_error',
     'not_found', 'conflict', 'unauthorized', 'forbidden', 'rate_limited',
     'method_not_allowed', 'internal_error', 'upstream_error',
+    'cancelled_by_user',
 })
 
 
 def public_message(code='', message='', upstream_code=''):
+    if code == 'cancelled_by_user':
+        return CANCELLED_BY_USER
     if code in {'submission_unknown', 'upstream_outcome_unknown'}:
         # Unknown submission outcomes must not suggest a confirmed refund.
         return QUEUE_INTERRUPTED
