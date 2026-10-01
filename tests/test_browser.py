@@ -258,7 +258,7 @@ def test_late_sdk_callback_cannot_supply_a_token_to_the_next_task():
     script = Path(__file__).parents[1].joinpath('app/verification.js').read_text(encoding='utf-8')
     harness = '''const vm = require('node:vm'), assert = require('node:assert/strict');
       const callbacks=[];
-      const context=vm.createContext({window:{turnstile:{render:(_,config)=>{callbacks.push(config.callback);return callbacks.length;},remove:()=>{}}},document:{createElement:()=>({}),body:{append:()=>{}},getElementById:()=>({remove:()=>{}})}});
+      const context=vm.createContext({window:{turnstile:{render:(_,config)=>{assert.equal(config.sitekey,'0x4AAAAAAEtm8R5R_NrKWw5K');callbacks.push(config.callback);return callbacks.length;},remove:()=>{}}},document:{createElement:()=>({}),body:{append:()=>{}},getElementById:()=>({remove:()=>{}})}});
       vm.runInContext(SCRIPT,context); callbacks[0]('first-token');
       assert.equal(context.window.__art2apiVerification.token,'first-token');
       vm.runInContext(CLEANUP,context); callbacks[0]('stale-token');

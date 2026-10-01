@@ -1,5 +1,5 @@
 (() => {
-  // Public generation sitekey and callbacks observed in Artlist's loaded client.
+  // The loaded Artlist client prefers the managed generation sitekey.
   // No model selection, Generate button, fetch mutation or challenge solving.
   const container = document.createElement('div');
   container.id = 'art2api-normal-verification';
@@ -11,7 +11,7 @@
   };
   update({status: 'waiting'});
   window.__art2apiVerificationWidget = window.turnstile.render(container, {
-    sitekey: '0x4AAAAAAD-4st6Pct76Aua3',
+    sitekey: '0x4AAAAAAEtm8R5R_NrKWw5K',
     appearance: 'interaction-only',
     theme: 'dark',
     callback: token => update({status: 'ready', token}),
