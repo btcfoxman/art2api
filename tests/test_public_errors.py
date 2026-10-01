@@ -12,7 +12,7 @@ from app.main import create_app
 from app.public_errors import (
     PUBLIC_MESSAGES, public_message, QUEUE_LIMIT, QUEUE_INTERRUPTED, CONTENT_POLICY,
     OUTPUT_VIDEO_POLICY, INPUT_PERSON, REFERENCE_PERSON, TEXT_POLICY, IMAGE_POLICY,
-    VIDEO_POLICY, MEDIA_DURATION, MEDIA_LIMIT, MEDIA_FORMAT, MEDIA_DOWNLOAD,
+    VIDEO_POLICY, MEDIA_DURATION, MEDIA_LIMIT, MEDIA_FORMAT, MEDIA_DOWNLOAD, MEDIA_UPLOAD,
     MEDIA_EXTERNAL, GENERATION_FAILED, UPSTREAM_MAINTENANCE,
 )
 from app.web_catalog import generation_result, profiles
@@ -78,7 +78,8 @@ def test_new_upstream_failures_store_safe_category_without_raw_reason():
     assert 'private-token' not in json.dumps(result)
     maintenance = generation_result({'status':'Failed', 'errorCode':'SERVICE_MAINTENANCE', 'reason':PRIVATE})
     assert maintenance['public_error_message'] == UPSTREAM_MAINTENANCE
-    assert len(PUBLIC_MESSAGES) == 21
+    assert len(PUBLIC_MESSAGES) == 22
+    assert public_message('media_upload_failed', 'Artlist 素材上传连接中断') == MEDIA_UPLOAD
     for literal in PUBLIC_MESSAGES:
         assert public_message('generation_failed', literal) == literal
 

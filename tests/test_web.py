@@ -412,6 +412,10 @@ async def test_generation_failure_preserves_safe_upstream_code_without_signed_ur
                                     'reason':'OutputVideoSensitiveContentDetected.PolicyViolation: copyright restrictions https://private.example/?signature=secret'})
     assert '输出视频' in video_review['error_message'] and '版权限制' in video_review['error_message']
     assert 'private.example' not in json.dumps(video_review) and 'signature' not in json.dumps(video_review)
+    input_video_review=generation_result({'status':'Failed','errorCode':'PROVIDER_CONTENT_SAFETY_VIOLATION',
+                                          'reason':'The input video may contain sensitive information (InputVideoSensitiveContentDetected) https://private.example/?signature=secret'})
+    assert '参考视频审核未通过' in input_video_review['error_message']
+    assert 'private.example' not in json.dumps(input_video_review) and 'signature' not in json.dumps(input_video_review)
     generic=generation_result({'status':'Failed','errorCode':'PROVIDER_CONTENT_SAFETY_VIOLATION','reason':'other policy violation'})
     assert '内容审核未通过' in generic['error_message'] and '版权' not in generic['error_message']
     audio=generation_result({'status':'Failed','errorCode':'FILE_OPTIMIZATION_FAILED',

@@ -160,13 +160,16 @@ def generation_result(data):
             message = 'Artlist 账号可用积分不足，请检查账号额度'
         if code == 'PROVIDER_CONTENT_SAFETY_VIOLATION':
             message = 'Artlist 内容审核未通过，请检查提示词或参考素材'
-            if 'OutputAudioSensitiveContentDetected' in str(data.get('reason', '')):
+            reason = str(data.get('reason', ''))
+            if 'InputVideoSensitiveContentDetected' in reason:
+                message = 'Artlist 参考视频审核未通过，请更换参考视频'
+            elif 'OutputAudioSensitiveContentDetected' in reason:
                 message = 'Artlist 输出音频审核未通过'
-                if 'copyright' in str(data.get('reason', '')).lower():
+                if 'copyright' in reason.lower():
                     message = 'Artlist 拒绝输出音频：可能涉及版权限制，请调整音频相关请求或参考素材'
-            elif 'OutputVideoSensitiveContentDetected' in str(data.get('reason', '')):
+            elif 'OutputVideoSensitiveContentDetected' in reason:
                 message = 'Artlist 输出视频审核未通过'
-                if 'copyright' in str(data.get('reason', '')).lower():
+                if 'copyright' in reason.lower():
                     message = 'Artlist 拒绝输出视频：可能涉及版权限制，请调整相关请求或参考素材'
         if code == 'FILE_OPTIMIZATION_FAILED':
             message = 'Artlist 参考素材预处理失败'

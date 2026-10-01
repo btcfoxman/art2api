@@ -21,6 +21,7 @@ MEDIA_DURATION = '素材时长不支持，请修改后再试~'
 MEDIA_LIMIT = '素材超限，请修改后再试~'
 MEDIA_FORMAT = '素材格式不支持，请修改后再试~'
 MEDIA_DOWNLOAD = '素材下载失败，请检查素材链接后重试~'
+MEDIA_UPLOAD = '参考素材上传连接中断，请稍后重试~'
 MEDIA_EXTERNAL = '素材仅支持外链，暂不支持文件流/Base64等~'
 GENERATION_FAILED = '生成失败，积分已返还，请重试~'
 
@@ -28,7 +29,7 @@ PUBLIC_MESSAGES = frozenset({
     QUEUE_LIMIT, CONTENT_POLICY, REFERENCE_PERSON, INPUT_PERSON, OUTPUT_VIDEO_POLICY,
     TEXT_RETRY, VIDEO_RETRY, TEXT_EDIT, VIDEO_POLICY, IMAGE_POLICY, CONTENT_RETRY,
     IMAGE_EDIT, TEXT_POLICY, QUEUE_INTERRUPTED, MEDIA_DURATION, MEDIA_LIMIT,
-    MEDIA_FORMAT, MEDIA_DOWNLOAD, MEDIA_EXTERNAL, GENERATION_FAILED, UPSTREAM_MAINTENANCE,
+    MEDIA_FORMAT, MEDIA_DOWNLOAD, MEDIA_UPLOAD, MEDIA_EXTERNAL, GENERATION_FAILED, UPSTREAM_MAINTENANCE,
 })
 
 # These generic codes carry routing/idempotency semantics. Never echo arbitrary
@@ -88,6 +89,8 @@ def public_message(code='', message='', upstream_code=''):
         'input_url_unreachable', '素材下载', '素材地址', '素材不可读取', '无法读取参考素材', 'for url',
     )):
         return MEDIA_DOWNLOAD
+    if code == 'media_upload_failed':
+        return MEDIA_UPLOAD
     if any(word in text for word in ('素材格式', '帧率', '图片尺寸', '素材转换失败', '素材信息解析',
                                      '不支持 image_urls', '不支持 video_urls', '不支持 audio_urls')):
         return MEDIA_FORMAT

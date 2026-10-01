@@ -481,8 +481,21 @@ class WebClient:
                 raise ValueError('上传签名地址不在 Artlist 存储域名内')
             # The upload client has no Artlist cookies or authorization headers.
             content = bytes(content)
-            with measure(record, 'upload_seconds'):
-                response=await http.put(target,content=content,headers={'Content-Type':mime},timeout=timeout)
+            for attempt in range(1, 4):
+                record['upload_attempts'] = attempt
+                try:
+                    with measure(record, 'upload_seconds'):
+                        response=await http.put(target,content=content,headers={'Content-Type':mime},timeout=timeout)
+                except TRANSIENT_TRANSPORT_ERRORS as exc:
+                    if attempt == 3:
+                        raise GatewayError(f'Artlist 素材上传连接中断（{type(exc).__name__}；已尝试 3 次）',
+                                           'media_upload_failed', 502, retryable=True) from None
+                    self.db.event('media_upload_retry',
+                                  f'{kind} PUT transient {type(exc).__name__}; attempt {attempt}/3',
+                                  self.account_id, web_task_context.get())
+                    await asyncio.sleep(attempt)
+                else:
+                    break
             record['upload_bytes'] = len(content)
             if not 200<=response.status_code<300:
                 raise ValueError('Artlist 参考素材上传失败')

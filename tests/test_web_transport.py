@@ -11,7 +11,7 @@ from app.db import Database
 from app.errors import GatewayError
 from app.service import Service
 from app.public_errors import GENERATION_FAILED, public_error
-from app.web import WebClient, web_task_context
+from app.web import WebClient, media_context, web_task_context
 from app.web_catalog import profiles
 
 
@@ -33,6 +33,58 @@ def factory_for(responder, proxies):
         proxies.append(proxy)
         return httpx.AsyncClient(transport=httpx.MockTransport(responder), **kwargs)
     return factory
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failed_puts', [1, 3])
+async def test_media_upload_retries_only_the_same_presigned_put(setup, failed_puts):
+    db, settings, aid = setup
+    stored = 'https://artlist-prod-ai-toolkit-custom-user-uploads.s3.eu-central-1.amazonaws.com/object'
+    put_url = stored + '?X-Amz-Signature=upload&x-id=PutObject'
+    get_url = stored + '?X-Amz-Signature=download&x-id=GetObject'
+    calls = []
+
+    def responder(request):
+        route = request.url.path.rsplit('/', 1)[-1]
+        calls.append((request.method, route, bytes(request.content) if request.method == 'PUT' else b''))
+        if request.url.host == 'toolkit.artlist.io':
+            value = {'presignedUrl': put_url, 'fileKey': 'object'} if route == 'uploadRouter.getPresignedUrl' else {'presignedUrl': get_url}
+            return httpx.Response(200, json={'result': {'data': {'json': value}}})
+        if request.url.host == 'media.example':
+            return httpx.Response(200, content=b'image-content', headers={'content-type': 'image/png'})
+        if request.method == 'PUT':
+            if sum(method == 'PUT' for method, _, _ in calls) <= failed_puts:
+                raise httpx.RemoteProtocolError('signed URL and private proxy detail', request=request)
+            return httpx.Response(200)
+        return httpx.Response(206, content=b'x')
+
+    record = {}
+    token = media_context.set(record)
+    try:
+        with patch('app.web.client', factory_for(responder, [])), patch('app.web.probe', AsyncMock(return_value={
+            'streams': [{'codec_type': 'video', 'width': 1280, 'height': 720}]
+        })), patch('app.web.asyncio.sleep', new_callable=AsyncMock) as sleep:
+            web = WebClient(aid, db, settings)
+            try:
+                if failed_puts == 3:
+                    with pytest.raises(GatewayError) as error:
+                        await web.upload('https://media.example/input.png', 'image')
+                    assert error.value.code == 'media_upload_failed'
+                    assert 'signed URL' not in str(error.value) and 'private proxy detail' not in str(error.value)
+                else:
+                    result = await web.upload('https://media.example/input.png', 'image')
+                    assert result['file_key'] == 'object'
+            finally:
+                await web.aclose()
+    finally:
+        media_context.reset(token)
+    puts = [body for method, _, body in calls if method == 'PUT']
+    assert len(puts) == min(failed_puts + 1, 3)
+    assert puts == [b'image-content'] * len(puts)
+    assert record['upload_attempts'] == len(puts)
+    assert len([1 for method, route, _ in calls if route == 'uploadRouter.getPresignedUrl']) == 1
+    assert sleep.await_count == len(puts) - 1
+    assert len([e for e in db.events() if e['kind'] == 'media_upload_retry']) == len(puts) - 1
 
 
 @pytest.mark.asyncio
