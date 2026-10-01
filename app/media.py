@@ -5,6 +5,7 @@ import asyncio
 import json
 import math
 from contextlib import suppress
+from fractions import Fraction
 from pathlib import Path
 
 
@@ -160,4 +161,41 @@ async def adapt_reference_video(path: Path, metadata, request, policy):
     actions.append('转为 MP4 / H.264 / 30fps，参考视频短边 720px')
     record = {'policy': 'adjust', 'speed': round(speed, 6), 'before': before,
               'after': {key: result[key] for key in ('width', 'height', 'durationMs', 'fps')}, 'actions': actions}
+    return output, result, record
+
+
+async def normalize_reference_video_codec(path: Path, metadata, codec):
+    """Make uploaded reference video decodable by the generation pipeline."""
+    if codec == 'h264':
+        return path, metadata, None
+    output = path.with_name(path.stem + '-h264.mp4')
+    try:
+        await run_media_command('ffmpeg', '-nostdin', '-y', '-v', 'error', '-i', str(path),
+                                '-map', '0:v:0', '-map', '0:a:0?',
+                                '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18',
+                                '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k',
+                                '-threads', '2', '-movflags', '+faststart', str(output))
+    except asyncio.TimeoutError:
+        raise ValueError('参考视频转为 H.264 超时') from None
+    media = await probe(output)
+    visual = next((stream for stream in media.get('streams', [])
+                   if stream.get('codec_type') == 'video'), {})
+    duration = round(float(media.get('format', {}).get('duration', 0)) * 1000)
+    width, height = metadata.get('width'), metadata.get('height')
+    original_duration = metadata.get('durationMs', 0)
+    try:
+        fps = float(Fraction(visual.get('avg_frame_rate', '0/1')))
+    except (ValueError, ZeroDivisionError):
+        fps = 0
+    if (visual.get('codec_name') != 'h264' or visual.get('width') != width
+            or visual.get('height') != height or abs(duration-original_duration) > 250
+            or not math.isclose(fps, metadata.get('fps', 0), rel_tol=.001, abs_tol=.01)):
+        raise ValueError('参考视频转为 H.264 后的规格不符合要求')
+    result = {**metadata, 'fileName': output.name, 'mimeType': 'video/mp4',
+              'byteSize': output.stat().st_size, 'durationMs': duration}
+    record = {'policy': 'normalize_codec', 'before': {'codec': codec, 'width': width,
+              'height': height, 'durationMs': original_duration},
+              'after': {'codec': 'h264', 'width': width, 'height': height,
+                        'durationMs': duration},
+              'actions': ['将参考视频转为 MP4 / H.264，保留画面尺寸与时长']}
     return output, result, record

@@ -229,6 +229,7 @@ async def test_task_recovers_preflight_but_never_repeats_generation(setup, lose_
     seen, proxies = [], []
     def responder(request):
         procedure = request.url.path.rsplit('/', 1)[-1]
+        assert request.headers['x-trpc-source'] == 'nextjs-react'
         seen.append(procedure)
         if procedure == 'modelRouter.getCostQuote' and seen.count(procedure) == 1:
             raise httpx.ConnectTimeout('preflight timeout', request=request)

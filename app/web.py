@@ -21,7 +21,7 @@ from jsonschema import Draft202012Validator, ValidationError
 from app.catalog import local_schema
 from app.cookies import parse_cookie_header
 from app.errors import GatewayError
-from app.media import adapt_reference_video, append_audio_silence, audio_silence_plan, fps_in_range, probe
+from app.media import adapt_reference_video, append_audio_silence, audio_silence_plan, fps_in_range, normalize_reference_video_codec, probe
 from app.network import client, public_media_url
 from app.web_catalog import GROUPS, reference_header, generation_payload, generation_result, profiles, quote_input, reference_prompt, validate_request
 
@@ -211,7 +211,7 @@ class WebClient:
         if not secret.get('web_cookie'):
             raise GatewayError('需要登录 Artlist 网页账号', 'reauthorization_required', 401)
         headers = {'Cookie': secret['web_cookie'], 'User-Agent': secret.get('web_user_agent', ''),
-                   'Origin': BASE, 'Referer': BASE+'/', 'x-trpc-source': 'react', 'x-request-id': str(uuid.uuid4())}
+                   'Origin': BASE, 'Referer': BASE+'/', 'x-trpc-source': 'nextjs-react', 'x-request-id': str(uuid.uuid4())}
         if path != '/api/auth/session' and (not path.startswith('/api/trpc/') or path.removeprefix('/api/trpc/') not in PROCEDURES):
             raise ValueError('网页接口不在已采集的接口清单中')
         timeout = self.settings.request_timeout
@@ -463,6 +463,10 @@ class WebClient:
                     with measure(record, 'transform_seconds'):
                         path, metadata, processing = await adapt_reference_video(
                             path, metadata, reference_request, self.settings.sd25_video_policy)
+                if kind == 'video' and processing is None:
+                    with measure(record, 'transform_seconds'):
+                        path, metadata, processing = await normalize_reference_video_codec(
+                            path, metadata, visual.get('codec_name'))
                 if kind == 'audio' and silence_seconds:
                     with measure(record, 'transform_seconds'):
                         path, metadata, processing = await append_audio_silence(path, metadata, silence_seconds)

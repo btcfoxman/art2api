@@ -232,7 +232,7 @@ async def test_uploaded_media_uses_separate_get_signature_and_checks_readability
         return httpx.AsyncClient(transport=httpx.MockTransport(responder),**kwargs)
     probe=AsyncMock()
     probe.returncode=0
-    probe.communicate.return_value=(json.dumps({'streams':[{'codec_type':'video','width':1280,'height':720,'avg_frame_rate':'24/1'}],
+    probe.communicate.return_value=(json.dumps({'streams':[{'codec_type':'video','codec_name':'h264','width':1280,'height':720,'avg_frame_rate':'24/1'}],
                                                'format':{'duration':'4.0'}}).encode(),b'')
     async def pad(path, metadata, seconds):
         assert path.read_bytes()==b'media' and seconds==2

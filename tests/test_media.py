@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.catalog import normalize_request
-from app.media import adapt_reference_video, append_audio_silence, audio_silence_plan, probe, run_media_command
+from app.media import adapt_reference_video, append_audio_silence, audio_silence_plan, normalize_reference_video_codec, probe, run_media_command
 from app.web_catalog import quote_input
 
 
@@ -94,6 +94,32 @@ async def test_video_adaptation_matches_output_spec_and_preserves_source(tmp_pat
     streams = (await probe(output))['streams']
     assert any(s['codec_type']=='audio' for s in streams) == with_audio
     assert 'fileUrl' not in str(record) and record['before']['width']==120
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not shutil.which('ffmpeg') or not shutil.which('ffprobe'), reason='ffmpeg and ffprobe required')
+async def test_hevc_reference_is_normalized_without_changing_length_or_dimensions(tmp_path):
+    original = tmp_path/'source.mp4'
+    await run_media_command('ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi',
+                            '-i', 'color=c=blue:s=120x160:r=30:d=2', '-f', 'lavfi',
+                            '-i', 'sine=frequency=440:duration=2', '-c:v', 'libx265',
+                            '-x265-params', 'log-level=error', '-pix_fmt', 'yuv420p',
+                            '-c:a', 'aac', '-threads', '1', str(original))
+    metadata = {'width': 120, 'height': 160, 'durationMs': 2000, 'fps': 30,
+                'fileName': original.name, 'mimeType': 'video/mp4', 'byteSize': original.stat().st_size}
+    original_hash = hashlib.sha256(original.read_bytes()).hexdigest()
+    output, after, record = await normalize_reference_video_codec(original, metadata, 'hevc')
+    assert output != original and hashlib.sha256(original.read_bytes()).hexdigest() == original_hash
+    assert after['byteSize'] == output.stat().st_size and after['fileName'].endswith('-h264.mp4')
+    assert abs(after['durationMs'] - 2000) <= 250
+    streams = (await probe(output))['streams']
+    video = next(stream for stream in streams if stream['codec_type'] == 'video')
+    assert (video['codec_name'], video['width'], video['height']) == ('h264', 120, 160)
+    assert any(stream['codec_type'] == 'audio' for stream in streams)
+    assert record['before']['codec'] == 'hevc' and record['after']['codec'] == 'h264'
+    with patch('app.media.run_media_command', AsyncMock()) as command:
+        assert await normalize_reference_video_codec(output, after, 'h264') == (output, after, None)
+        command.assert_not_awaited()
 
 
 def test_sd25_reference_video_uses_auto_in_quote_and_submission_settings():
