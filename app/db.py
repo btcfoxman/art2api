@@ -120,7 +120,9 @@ class Database:
 
     def active_count(self, account_id):
         marks = ",".join("?" for _ in ACTIVE)
-        return self.conn.execute(f"SELECT COUNT(*) FROM tasks WHERE account_id=? AND status IN ({marks})", (account_id, *ACTIVE)).fetchone()[0]
+        return self.conn.execute(
+            f"SELECT COUNT(*) FROM tasks WHERE account_id=? AND status IN ({marks}) AND (status!='submission_unknown' OR cleared_at=0)",
+            (account_id, *ACTIVE)).fetchone()[0]
 
     def save_account(self, values, account_id=None):
         with self.transaction() as con:
@@ -224,14 +226,16 @@ class Database:
         with self.lock:
             if active:
                 marks = ','.join('?' for _ in ACTIVE)
-                rows = self.conn.execute(f"SELECT id FROM tasks WHERE status IN ({marks}) ORDER BY created_at", ACTIVE).fetchall()
+                rows = self.conn.execute(
+                    f"SELECT id FROM tasks WHERE status IN ({marks}) AND (status!='submission_unknown' OR cleared_at=0) ORDER BY created_at",
+                    ACTIVE).fetchall()
             else:
-                rows = self.conn.execute("SELECT id FROM tasks WHERE cleared_at=0 OR status NOT IN ('succeeded','failed') ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", (limit, offset)).fetchall()
+                rows = self.conn.execute("SELECT id FROM tasks WHERE cleared_at=0 OR status NOT IN ('succeeded','failed','submission_unknown') ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", (limit, offset)).fetchall()
             return [self.task(row['id']) for row in rows]
 
     def task_summary(self):
         with self.lock:
-            counts = {row['status']: row['n'] for row in self.conn.execute("SELECT status, COUNT(*) AS n FROM tasks WHERE cleared_at=0 OR status NOT IN ('succeeded','failed') GROUP BY status")}
+            counts = {row['status']: row['n'] for row in self.conn.execute("SELECT status, COUNT(*) AS n FROM tasks WHERE cleared_at=0 OR status NOT IN ('succeeded','failed','submission_unknown') GROUP BY status")}
             return {'total': sum(counts.values()), 'active': sum(counts.get(s, 0) for s in ACTIVE),
                     'succeeded': counts.get('succeeded', 0), 'failed': counts.get('failed', 0),
                     'unknown': counts.get('submission_unknown', 0)}
@@ -248,6 +252,21 @@ class Database:
             if count:
                 self.event('tasks_cleared', f'已从最近任务列表清空 {count} 条已完成或失败的任务')
             return count
+
+    def clear_unknown_task(self, task_id):
+        # Dismiss the ambiguous submission without losing its audit trail or
+        # idempotency key. The upstream request is never retried or cancelled.
+        with self.transaction() as con:
+            row = con.execute('SELECT account_id,status,cleared_at FROM tasks WHERE id=?', (task_id,)).fetchone()
+            if not row:
+                raise KeyError('task not found')
+            if row['status'] != 'submission_unknown':
+                raise GatewayError('only an unknown submission can be cleared individually', 'invalid_task_state', 409)
+            if row['cleared_at']:
+                return False
+            con.execute('UPDATE tasks SET cleared_at=? WHERE id=?', (time.time(), task_id))
+            self.event('task_cleared', '结果未知任务已从最近任务列表清除；保留原记录和防重提交键', row['account_id'], task_id)
+            return True
 
     def runtime_settings(self):
         with self.lock:
@@ -323,7 +342,12 @@ class Database:
         with self.transaction() as con:
             for key,value in fields.items():
                 if key == 'result': value = dumps(value)
-                con.execute(f'UPDATE tasks SET {key}=?,updated_at=? WHERE id=?', (value,time.time(),task_id))
+                # A cleared unknown task becomes visible and consumes a slot
+                # again if an operator resumes its upstream status polling.
+                if key == 'status' and value not in {'succeeded', 'failed'}:
+                    con.execute(f'UPDATE tasks SET {key}=?,cleared_at=0,updated_at=? WHERE id=?', (value,time.time(),task_id))
+                else:
+                    con.execute(f'UPDATE tasks SET {key}=?,updated_at=? WHERE id=?', (value,time.time(),task_id))
 
     def event(self, kind, detail, account_id=None, task_id=None):
         with self.lock:

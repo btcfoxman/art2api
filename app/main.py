@@ -362,6 +362,12 @@ def create_app(settings=None):
     async def clear_completed_tasks():
         return {'cleared': db.clear_completed_tasks()}
 
+    @app.post('/api/tasks/{task_id}/clear', dependencies=[Depends(admin)])
+    async def clear_unknown_task(task_id: str):
+        if task_id in service.jobs or task_id in service.recovery_jobs:
+            raise GatewayError('task is still processing locally', 'task_busy', 409)
+        return {'cleared': db.clear_unknown_task(task_id)}
+
     @app.post('/api/tasks', dependencies=[Depends(admin)])
     async def test_task(request: Request):
         return await service.create(await request.json(), request.headers.get('Idempotency-Key', ''))

@@ -84,7 +84,7 @@ function taskRow(task) {
   return `<tr data-task-id="${esc(task.id)}"><td><button class="cell-title link-button mono" data-detail="${esc(task.id)}" title="${esc(task.id)}">${esc(task.id.slice(0,20))}</button><span class="cell-sub mono" title="ARTAPI · ${esc(account)} · 代理 v${task.proxy_version}">ARTAPI · ${esc(account)}</span></td>
     <td class="prompt-cell"><span class="cell-title" title="${esc(request.prompt)}">${esc(request.prompt || '—')}</span><span class="task-meta-line"><span class="task-spec" title="${esc(spec)}">${esc(spec)}</span><span class="media-text">${mediaButtons(task)}</span></span></td>
     <td>${badge(task.internal_status)}</td><td><div class="progress-stack"><span class="progress-value" title="按任务状态展示的阶段进度"><b class="mono">${progress}%</b><span class="progress-track"><i style="width:${progress}%"></i></span></span><span class="elapsed">${terminal ? '耗时' : '已用'} ${durationText(task)}</span></div></td>
-    <td><span class="time-stack"><span>创建 ${esc(stamp(task.created_at))}</span><span>更新 ${esc(stamp(task.updated_at))}</span></span></td><td>${result}${task.internal_status === 'submission_unknown' ? `<button data-recover="${esc(task.id)}">恢复查询</button>` : ''}</td></tr>`;
+    <td><span class="time-stack"><span>创建 ${esc(stamp(task.created_at))}</span><span>更新 ${esc(stamp(task.updated_at))}</span></span></td><td>${result}${task.internal_status === 'submission_unknown' ? `<button data-recover="${esc(task.id)}">恢复查询</button><button data-clear-unknown="${esc(task.id)}" title="仅从列表清除，保留任务记录和原请求防重">清除</button>` : ''}</td></tr>`;
 }
 function syncClearTasksButton() {
   $('#clearTasks').disabled = state.clearingTasks || !(state.overview.succeeded + state.overview.failed);
@@ -276,7 +276,20 @@ async function closeBrowser(){clearInterval(browserTimer);const id=state.browser
 $('#closeBrowser').onclick=()=>closeBrowser().catch(error=>toast(error.message));$('#browserDialog').addEventListener('cancel',event=>{event.preventDefault();closeBrowser().catch(error=>toast(error.message));});
 $('#newTask').onclick=()=>{if(!$('#taskModel').options.length){toast('请先授权、检测并启用已配置模型的账号');return;}$('#taskDialog').showModal();};
 $('#taskForm').onsubmit=event=>{event.preventDefault();busy(event.target.querySelector('[type=submit]'),async()=>{const values=Object.fromEntries(new FormData(event.target));values.duration=Number(values.duration);for(const key of ['image_urls','video_urls','audio_urls'])values[key]=values[key].split(/\r?\n/).map(v=>v.trim()).filter(Boolean);const body=JSON.stringify(values);await api('/api/tasks',{method:'POST',headers:{'Idempotency-Key':submissionKey(body)},body});pendingSubmission=null;state.page=0;$('#taskDialog').close();await refresh();toast('生成任务已提交');});};
-$('#tasks').onclick=event=>{const detail=event.target.closest('[data-detail]');if(detail){openTaskDetail(state.tasks.find(t=>t.id===detail.dataset.detail));return;}const button=event.target.closest('[data-recover]');if(!button)return;const id=prompt('输入该账号对应的真实 Artlist generation ID，仅恢复查询，不重新生成：');if(id)busy(button,async()=>{await api(`/api/tasks/${button.dataset.recover}/recover`,{method:'POST',body:JSON.stringify({upstream_id:id})});await refresh();});};
+$('#tasks').onclick=event=>{
+  const detail=event.target.closest('[data-detail]');
+  if(detail){openTaskDetail(state.tasks.find(t=>t.id===detail.dataset.detail));return;}
+  const clear=event.target.closest('[data-clear-unknown]');
+  if(clear){
+    if(!confirm('清除这条结果未知任务？将释放并发名额，保留历史记录和防重提交键；不会取消上游生成。'))return;
+    busy(clear,async()=>{await api(`/api/tasks/${clear.dataset.clearUnknown}/clear`,{method:'POST'});await refresh();toast('结果未知任务已清除');});
+    return;
+  }
+  const button=event.target.closest('[data-recover]');
+  if(!button)return;
+  const id=prompt('输入该账号对应的真实 Artlist generation ID，仅恢复查询，不重新生成：');
+  if(id)busy(button,async()=>{await api(`/api/tasks/${button.dataset.recover}/recover`,{method:'POST',body:JSON.stringify({upstream_id:id})});await refresh();});
+};
 $('#docsButton').onclick=()=>$('#docsDialog').showModal();$('#refreshButton').onclick=event=>busy(event.currentTarget,refresh);$('#logout').onclick=()=>api('/logout',{method:'POST'}).then(()=>location.href='/login').catch(error=>toast(error.message));
 refresh().catch(error=>toast(error.message));configureRefresh();
 

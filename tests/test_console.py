@@ -207,6 +207,51 @@ def test_clear_completed_tasks_protects_other_states_and_preserves_channel_retri
         assert http.delete('/api/tasks/completed', headers=MARKER).json() == {'cleared': 1}
 
 
+def test_clear_unknown_task_releases_capacity_without_losing_recovery_or_idempotency(config):
+    app = create_app(config)
+    app.state.service.start = AsyncMock()
+    app.state.service.schedule = Mock()
+    with TestClient(app) as http:
+        db = app.state.db
+        aid = account(db)['id']
+        request = normalize_request({'model': MODEL, 'prompt': 'sample'})
+        task, _ = db.create_task(request, [(aid, profiles()[MODEL])], 'unknown-key', 100)
+        db.update_task(task['id'], status='submission_unknown', error='response lost', error_code='submission_unknown')
+        path = f"/api/tasks/{task['id']}/clear"
+        assert http.post(path, headers=MARKER).status_code == 401
+        http.post('/login', data={'token': config.admin_token})
+        assert http.post(path).status_code == 403
+        assert http.post(path, headers={**MARKER, 'Origin': 'https://untrusted.example'}).status_code == 403
+        assert http.post('/api/tasks/missing/clear', headers=MARKER).status_code == 404
+        assert db.active_count(aid) == db.task_summary()['unknown'] == 1
+        assert db.tasks()[0]['id'] == task['id']
+        app.state.service.recovery_jobs[task['id']] = Mock()
+        assert http.post(path, headers=MARKER).status_code == 409
+        assert db.task(task['id'])['cleared_at'] == 0
+        app.state.service.recovery_jobs.pop(task['id'])
+        assert http.post(path, headers=MARKER).json() == {'cleared': True}
+        assert http.post(path, headers=MARKER).json() == {'cleared': False}
+        assert db.task(task['id'])['cleared_at'] > 0
+        assert db.active_count(aid) == db.task_summary()['total'] == 0
+        assert db.tasks() == db.tasks(active=True) == []
+        assert http.get('/api/tasks').json() == []
+        assert http.get('/v1/videos/' + task['id'], headers={'Authorization': 'Bearer ' + config.api_key}).status_code == 200
+        replay, created = db.create_task(request, [], 'unknown-key', 100)
+        assert not created and replay['id'] == task['id']
+        second, created = db.create_task(request, [(aid, profiles()[MODEL])], 'second-key', 100)
+        assert created and db.active_count(aid) == 1
+        assert http.post(f"/api/tasks/{second['id']}/clear", headers=MARKER).status_code == 409
+        db.update_task(second['id'], status='failed')
+        upstream_id = '9dc2d0d9-8f19-4536-9371-2d3933cfd680'
+        assert http.post(f"/api/tasks/{task['id']}/recover", headers=MARKER,
+                         json={'upstream_id': upstream_id}).status_code == 200
+        assert db.task(task['id'])['cleared_at'] == 0
+        assert db.active_count(aid) == db.task_summary()['active'] == 1
+        assert task['id'] in {item['id'] for item in db.tasks()}
+        assert http.post(path, headers=MARKER).status_code == 409
+        assert len([e for e in db.events() if e['kind'] == 'task_cleared']) == 1
+
+
 def test_clear_tasks_migrates_existing_database_and_survives_restart(config):
     path = config.data_dir / 'art2api.db'
     db = Database(path, config.encryption_key)

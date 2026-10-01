@@ -16,6 +16,7 @@
 | POST | `/api/accounts/{id}/web-quote` | 管理端无素材报价检测，不生成 |
 | GET | `/api/accounts/{id}/web-tasks/{generation_id}` | 管理端查询已有网页任务与输出 |
 | DELETE | `/api/tasks/completed` | 管理端清空最近任务列表中所有已成功或已失败的任务；保留进行中和结果未知任务 |
+| POST | `/api/tasks/{id}/clear` | 管理端单独清除已停止本地处理的结果未知任务；释放并发名额，保留历史记录与防重提交键 |
 
 ```json
 {"model":"sd-2-5-480p","prompt":"海边日出，镜头缓慢推进","duration":5,"aspect_ratio":"16:9","image_urls":[],"video_urls":[],"audio_urls":[],"generate_audio":true}
@@ -28,6 +29,8 @@
 当前使用单个 Uvicorn 进程，不支持多个进程共同调度同一 SQLite 数据库。
 
 清空操作需要管理登录会话及 `X-Requested-With: art2api`，返回清理条数（如 `{"cleared":12}`），覆盖所有分页。清空后历史任务仍可按 ID 查询，幂等记录保持有效，不会因清空而重复生成。
+
+结果未知任务可在列表中单独点击“清除”，或调用 `POST /api/tasks/{id}/clear`。清除不会取消可能已被上游接受的生成，返回 `{"cleared":true}`；再次清除返回 `false`。如取得真实 generation ID，仍可按原任务 ID 调用恢复查询接口，任务会重新显示并占用并发名额。
 
 导入网页登录会话时 `team_id` 可留空。创建会话会按网页协议自动生成 UUID 填入必需的 `teamId`，无需查询或填写账号团队信息；已有显式配置仍保留兼容。
 
