@@ -109,9 +109,9 @@ def quote_input(request, assets):
     prompt, tags = reference_prompt(request)
     settings['prompt'] = prompt
     settings['generate_audio'] = request.get('generate_audio', defaults.get('generate_audio') == 'true')
-    # Seedance 2.5's reference-video submodel requires auto and inherits the
-    # uploaded video's shape/duration. prepare() first adapts or validates it.
-    if group == 515 and assets.get('video_urls'):
+    # Seedance 2.5's reference-video and start/end-frame submodels require
+    # auto. The selected submodel derives shape from the uploaded media.
+    if group == 515 and (assets.get('video_urls') or assets.get('first_frame')):
         settings['aspect_ratio'] = 'auto'
     if 'generation_mode' in defaults:
         modes = SNAPSHOT['groups'][str(group)]['settings']['generation_mode']['values']

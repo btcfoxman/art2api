@@ -174,9 +174,22 @@ class BrowserManager:
                 phase = time.monotonic()
                 await cdp.evaluate(CLEAR_VERIFICATION)
                 await cdp.evaluate(Path(__file__).with_name('verification.js').read_text(encoding='utf-8'))
-                for _ in range(60):
+                first_error_tick = None
+                last_error = None
+                for tick in range(60):
                     value = await cdp.evaluate('window.__art2apiVerification')
-                    if value and value.get('status') in {'ready', 'error', 'unsupported', 'timeout'}:
+                    status = value.get('status') if value else None
+                    if status == 'ready' or status in {'unsupported', 'timeout'}:
+                        break
+                    if status == 'error':
+                        last_error = value.get('code') or 'widget-error'
+                        if first_error_tick is None:
+                            first_error_tick = tick
+                    # The normal Turnstile widget retries transient challenge
+                    # failures. Keep it alive through the first-party client's
+                    # eight-second token wait before forwarding its final error.
+                    if first_error_tick is not None and tick - first_error_tick >= 7:
+                        value = {'status': 'error', 'code': last_error}
                         break
                     await asyncio.sleep(1)
                 else:

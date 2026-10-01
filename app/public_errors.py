@@ -90,7 +90,7 @@ def public_message(code='', message='', upstream_code=''):
         return MEDIA_LIMIT
     if any(word in text for word in ('公网 https url', 'url 数组', 'base64', '文件流', '仅支持外链')):
         return MEDIA_EXTERNAL
-    if code in {'media_unreachable', 'media_signature_invalid'} or any(word in text for word in (
+    if code in {'media_download_failed', 'media_unreachable', 'media_signature_invalid'} or any(word in text for word in (
         'input_url_unreachable', '素材下载', '素材地址', '素材不可读取', '无法读取参考素材', 'for url',
     )):
         return MEDIA_DOWNLOAD

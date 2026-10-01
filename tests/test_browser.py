@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 import asyncio
 import json
 import os
@@ -13,8 +13,9 @@ from app.errors import GatewayError
 
 
 class FakeCDP:
-    def __init__(self, identity='user-1', sdk_result=None):
+    def __init__(self, identity='user-1', sdk_result=None, sdk_results=None):
         self.identity, self.sdk_result = identity, sdk_result
+        self.sdk_results = list(sdk_results or [])
         self.ready, self.rounds, self.token = False, 0, None
         self.reader = Mock()
         self.reader.done.return_value = False
@@ -38,6 +39,7 @@ class FakeCDP:
         if expression == 'window.__art2apiVerification':
             self.sdk_entered.set()
             if self.sdk_gate: await self.sdk_gate.wait()
+            if self.sdk_results: return self.sdk_results.pop(0)
             return self.sdk_result or {'status':'ready','token':self.token}
         if expression == 'navigator.userAgent': return 'Browser'
         raise AssertionError('Unexpected CDP expression')
@@ -65,7 +67,8 @@ def fake_manager(cdp=None):
 @pytest.mark.parametrize('sdk_result,expected', [({'status':'ready','token':'normal-once'}, {'token':'normal-once'}), ({'status':'error','code':'600010'}, {'client_error':'600010'})])
 async def test_native_verification_blocks_paid_browser_request_and_forwards_actual_callback(sdk_result, expected):
     manager, db, cdp = fake_manager(FakeCDP(sdk_result=sdk_result))
-    result = await manager.generation_verification('account-1')
+    with patch('app.browser.asyncio.sleep', new_callable=AsyncMock):
+        result = await manager.generation_verification('account-1')
     assert {k:v for k,v in result.items() if k!='timing'} == expected
     assert result['timing']['browser_reused'] is False
     manager._open.assert_awaited_once_with('account-1','about:blank',purpose='verification')
@@ -77,6 +80,22 @@ async def test_native_verification_blocks_paid_browser_request_and_forwards_actu
     assert all(not c.args[0].startswith('Input.') for c in calls)
     assert cdp.token is None
     assert 'normal-once' not in str(db.event.call_args_list)
+    if sdk_result['status'] == 'error':
+        assert sum(call.args == ('window.__art2apiVerification',)
+                   for call in cdp.evaluate.await_args_list) == 8
+
+
+@pytest.mark.asyncio
+async def test_transient_turnstile_error_can_recover_to_token_before_widget_is_removed():
+    cdp = FakeCDP(sdk_results=[{'status':'error','code':'300030'},
+                               {'status':'waiting'},
+                               {'status':'ready','token':'recovered-token'}])
+    manager, db, _ = fake_manager(cdp)
+    with patch('app.browser.asyncio.sleep', new_callable=AsyncMock):
+        result = await manager.generation_verification('account-1')
+    assert result['token'] == 'recovered-token'
+    assert cdp.evaluate.await_args_list.count((('window.__art2apiVerification',), {})) == 3
+    assert cdp.token is None
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='Chromium singleton symlinks are Linux-specific')

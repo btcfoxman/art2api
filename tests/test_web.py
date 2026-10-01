@@ -165,6 +165,26 @@ def test_start_end_frames_are_not_silently_merged_into_references():
         validate_request({**request,'image_urls':['https://media.example/extra.png']},profiles()[request['model']])
 
 
+@pytest.mark.asyncio
+async def test_sd25_upload_adapts_start_and_end_frames_to_requested_ratio(setup):
+    db, settings, aid = setup
+    request = normalize_request({'model':MODEL,'prompt':'move naturally','duration':4,
+                                 'aspect_ratio':'9:16','first_frame':'https://media.example/start.jpg',
+                                 'last_frame':'https://media.example/end.jpg'})
+    task, _ = db.create_task(request, [(aid, profiles()[MODEL])], 'frame-upload', 10)
+    web = WebClient(aid, db, settings)
+    web.upload = AsyncMock(side_effect=lambda url, kind, **options: {
+        'file_key':url.rsplit('/', 1)[-1], 'file_url':url,
+        'metadata':{'fileName':'frame.png','mimeType':'image/png','byteSize':100,
+                    'width':720,'height':1280}})
+    assets = await web._prepare_media(task, {})
+    assert len(web.upload.await_args_list) == 2
+    assert all(call.kwargs == {'reference_request':request}
+               for call in web.upload.await_args_list)
+    assert all(call.args[1] == 'image' for call in web.upload.await_args_list)
+    assert len(assets['first_frame']) == len(assets['last_frame']) == 1
+
+
 def test_verified_task_tokens_are_encrypted_bound_and_single_use(setup):
     db,_,aid=setup
     req=normalize_request({'model':MODEL,'prompt':'test'})

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.catalog import normalize_request
-from app.media import adapt_reference_video, append_audio_silence, audio_silence_plan, normalize_reference_video_codec, probe, run_media_command
+from app.media import adapt_frame_image, adapt_reference_video, append_audio_silence, audio_silence_plan, normalize_reference_video_codec, probe, run_media_command
 from app.web_catalog import quote_input
 
 
@@ -133,3 +133,37 @@ def test_sd25_reference_video_uses_auto_in_quote_and_submission_settings():
     assert request['aspect_ratio']=='16:9' and request['duration']==8
     request['model']='doubao-seedance-2-0-mini-260615'
     assert quote_input(request, assets)[2]['aspect_ratio']=='16:9'
+
+
+def test_sd25_start_end_frames_use_auto_for_selected_submodel():
+    request = normalize_request({'model':'sd-2-5-480p','prompt':'move naturally',
+                                 'duration':4,'aspect_ratio':'9:16',
+                                 'first_frame':'https://example.com/start.jpg',
+                                 'last_frame':'https://example.com/end.jpg'})
+    assets = {field:[{'file_key':field,'file_url':'https://storage.example/'+field+'.jpg',
+                      'metadata':{'fileName':field+'.jpg','mimeType':'image/jpeg',
+                                  'byteSize':1000,'width':720,'height':1280}}]
+              for field in ('first_frame','last_frame')}
+    quote, inputs, settings, _ = quote_input(request, assets)
+    assert quote['input']['aspect_ratio'] == settings['aspect_ratio'] == 'auto'
+    assert inputs['image_url'].endswith('first_frame.jpg')
+    assert inputs['end_frame'].endswith('last_frame.jpg')
+    assert request['aspect_ratio'] == '9:16'
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not shutil.which('ffmpeg') or not shutil.which('ffprobe'), reason='ffmpeg and ffprobe required')
+async def test_square_frame_is_padded_to_requested_portrait_ratio(tmp_path):
+    original = tmp_path/'square.png'
+    await run_media_command('ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi',
+                            '-i', 'color=c=blue:s=120x120', '-frames:v', '1', str(original))
+    metadata = {'width':120,'height':120,'fileName':original.name,
+                'mimeType':'image/png','byteSize':original.stat().st_size}
+    request = {'aspect_ratio':'9:16'}
+    digest = hashlib.sha256(original.read_bytes()).hexdigest()
+    output, after, record = await adapt_frame_image(original, metadata, request)
+    assert output != original and hashlib.sha256(original.read_bytes()).hexdigest() == digest
+    assert (after['width'], after['height']) == (720, 1280)
+    assert after['byteSize'] == output.stat().st_size
+    assert record['policy'] == 'frame_aspect_pad'
+    assert await adapt_frame_image(output, after, request) == (output, after, None)

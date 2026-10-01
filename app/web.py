@@ -21,7 +21,7 @@ from jsonschema import Draft202012Validator, ValidationError
 from app.catalog import local_schema
 from app.cookies import parse_cookie_header
 from app.errors import GatewayError
-from app.media import adapt_reference_video, append_audio_silence, audio_silence_plan, fps_in_range, normalize_reference_video_codec, probe
+from app.media import adapt_frame_image, adapt_reference_video, append_audio_silence, audio_silence_plan, fps_in_range, normalize_reference_video_codec, probe
 from app.network import client, public_media_url
 from app.web_catalog import GROUPS, reference_header, generation_payload, generation_result, profiles, quote_input, reference_prompt, validate_request
 
@@ -224,7 +224,11 @@ class WebClient:
             self.db.update_credentials(self.account_id, {'web_last_rejection': {
                 'procedure': path.rsplit('/',1)[-1], 'status': response.status_code,
                 'task_id': web_task_context.get(), 'received_at': time.time(),
-                'content_type': response.headers.get('content-type', ''), 'body': response.text[:16000],
+                'content_type': response.headers.get('content-type', ''),
+                'server': response.headers.get('server', '')[:80],
+                'cf_ray': response.headers.get('cf-ray', '')[:80],
+                'request_id': response.headers.get('x-request-id', '')[:80],
+                'body': response.text[:16000],
             }})
             reason = rejection_reason(response)
             message = f'Artlist 拒绝网页协议请求（HTTP {response.status_code}，{reason}，{path.rsplit("/",1)[-1]}）'
@@ -408,26 +412,39 @@ class WebClient:
         timeout = httpx.Timeout(max(120, self.settings.request_timeout), connect=20)
         async with self.media_client() as http:
             with measure(record, 'download_seconds'):
-                for _ in range(4):
-                    async with http.stream('GET', url, timeout=timeout) as response:
-                        if response.is_redirect:
-                            url = public_media_url(urljoin(url, response.headers.get('location','')))
-                            continue
-                        if response.status_code >= 400:
-                            raise ValueError('参考素材下载失败')
-                        mime = response.headers.get('content-type','').split(';')[0].strip().lower()
-                        if not mime.startswith(kind+'/'):
-                            mime = mimetypes.guess_type(urlsplit(url).path)[0] or ''
-                        if not mime.startswith(kind+'/'):
-                            raise ValueError('参考素材类型不匹配')
-                        content = bytearray()
-                        async for chunk in response.aiter_bytes():
-                            content.extend(chunk)
-                            if len(content)>150*1024*1024:
-                                raise ValueError('参考素材超过 150 MiB')
+                for attempt in range(1, 4):
+                    record['download_attempts'] = attempt
+                    try:
+                        for _ in range(4):
+                            async with http.stream('GET', url, timeout=timeout) as response:
+                                if response.is_redirect:
+                                    url = public_media_url(urljoin(url, response.headers.get('location','')))
+                                    continue
+                                if response.status_code >= 400:
+                                    raise ValueError('参考素材下载失败')
+                                mime = response.headers.get('content-type','').split(';')[0].strip().lower()
+                                if not mime.startswith(kind+'/'):
+                                    mime = mimetypes.guess_type(urlsplit(url).path)[0] or ''
+                                if not mime.startswith(kind+'/'):
+                                    raise ValueError('参考素材类型不匹配')
+                                content = bytearray()
+                                async for chunk in response.aiter_bytes():
+                                    content.extend(chunk)
+                                    if len(content)>150*1024*1024:
+                                        raise ValueError('参考素材超过 150 MiB')
+                                break
+                        else:
+                            raise ValueError('参考素材重定向次数过多')
+                    except TRANSIENT_TRANSPORT_ERRORS as exc:
+                        if attempt == 3:
+                            raise GatewayError(f'参考素材下载连接中断（{type(exc).__name__}；已尝试 3 次）',
+                                               'media_download_failed', 502, retryable=True) from None
+                        self.db.event('media_download_retry',
+                                      f'{kind} GET transient {type(exc).__name__}; attempt {attempt}/3',
+                                      self.account_id, web_task_context.get())
+                        await asyncio.sleep(attempt)
+                    else:
                         break
-                else:
-                    raise ValueError('参考素材重定向次数过多')
             record['download_bytes'] = len(content)
             # Linux mime databases often know audio/x-wav but omit audio/wav.
             # Wire filenames must be stable across the developer OS and Docker.
@@ -467,6 +484,10 @@ class WebClient:
                     with measure(record, 'transform_seconds'):
                         path, metadata, processing = await normalize_reference_video_codec(
                             path, metadata, visual.get('codec_name'))
+                if kind == 'image' and reference_request is not None:
+                    with measure(record, 'transform_seconds'):
+                        path, metadata, processing = await adapt_frame_image(
+                            path, metadata, reference_request)
                 if kind == 'audio' and silence_seconds:
                     with measure(record, 'transform_seconds'):
                         path, metadata, processing = await append_audio_silence(path, metadata, silence_seconds)
@@ -599,7 +620,9 @@ class WebClient:
         for field,kind in [('image_urls','image'),('video_urls','video'),('audio_urls','audio'),('first_frame','image'),('last_frame','image')]:
             urls=request.get(field) or []
             if isinstance(urls,str):urls=[urls]
-            options = {'reference_request': request} if field == 'video_urls' and task['profile']['group_id'] == 515 else {}
+            options = ({'reference_request': request}
+                       if field in {'video_urls', 'first_frame', 'last_frame'}
+                       and task['profile']['group_id'] == 515 else {})
             assets[field] = [None] * len(urls)
             uploads.extend(schedule_upload(field, index, url, kind, options) for index, url in enumerate(urls))
         await self.parallel_uploads(uploads)

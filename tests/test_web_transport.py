@@ -36,6 +36,55 @@ def factory_for(responder, proxies):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('failed_gets', [1, 3])
+async def test_media_source_get_retries_before_any_upload(setup, failed_gets):
+    db, settings, aid = setup
+    stored = 'https://artlist-prod-ai-toolkit-custom-user-uploads.s3.eu-central-1.amazonaws.com/object'
+    calls = []
+
+    def responder(request):
+        calls.append((request.method, request.url.host))
+        if request.url.host == 'media.example':
+            if sum(host == 'media.example' for _, host in calls) <= failed_gets:
+                raise httpx.RemoteProtocolError('private download URL and proxy detail', request=request)
+            return httpx.Response(200, content=b'image-content', headers={'content-type':'image/png'})
+        if request.url.host == 'toolkit.artlist.io':
+            name = request.url.path.rsplit('/', 1)[-1]
+            value = ({'presignedUrl':stored+'?X-Amz-Signature=upload&x-id=PutObject',
+                      'fileKey':'object'} if name == 'uploadRouter.getPresignedUrl' else
+                     {'presignedUrl':stored+'?X-Amz-Signature=download&x-id=GetObject'})
+            return httpx.Response(200, json={'result': {'data': {'json': value}}})
+        return httpx.Response(200 if request.method == 'PUT' else 206, content=b'x')
+
+    record = {}
+    token = media_context.set(record)
+    try:
+        with (patch('app.web.client', factory_for(responder, [])),
+              patch('app.web.probe', AsyncMock(return_value={
+                  'streams':[{'codec_type':'video','width':1280,'height':720}]})),
+              patch('app.web.asyncio.sleep', new_callable=AsyncMock) as sleep):
+            web = WebClient(aid, db, settings)
+            try:
+                if failed_gets == 3:
+                    with pytest.raises(GatewayError) as error:
+                        await web.upload('https://media.example/input.png', 'image')
+                    assert error.value.code == 'media_download_failed'
+                    assert 'private download URL' not in str(error.value)
+                else:
+                    result = await web.upload('https://media.example/input.png', 'image')
+                    assert result['file_key'] == 'object'
+            finally:
+                await web.aclose()
+    finally:
+        media_context.reset(token)
+    assert sum(host == 'media.example' for _, host in calls) == min(failed_gets+1, 3)
+    assert sum(host == 'toolkit.artlist.io' for _, host in calls) == (0 if failed_gets == 3 else 2)
+    assert sleep.await_count == min(failed_gets, 2)
+    assert record['download_attempts'] == min(failed_gets+1, 3)
+    assert len([e for e in db.events() if e['kind'] == 'media_download_retry']) == min(failed_gets, 2)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('failed_puts', [1, 3])
 async def test_media_upload_retries_only_the_same_presigned_put(setup, failed_puts):
     db, settings, aid = setup
