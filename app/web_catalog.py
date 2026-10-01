@@ -107,25 +107,31 @@ def reference_header(request, tags):
     return ' '.join(tag['tagId'] for tag in ordered) + '\n' if tags else ''
 
 
-_DIALOGUE = re.compile(r'台词[^\r\n：:]{0,80}[：:]\s*[“「『"‘\']([^”」』"’\'\r\n]{1,200})')
+_DIALOGUE = re.compile(r'(?:台词|对白|配音指令)[^\r\n：:]{0,80}[：:]\s*(?:[^“「『"‘\'\r\n]{1,20}[：:]\s*)?[“「『"‘\']([^”」』"’\'\r\n]{1,200})')
 
 
 def speech_language_prompt(prompt):
-    """Label Japanese dialogue at the line itself, as verified by a successful job.
+    """Label quoted dialogue at the line itself when the language is implicit.
 
     The web model has no speech-language setting. In an otherwise identical
     generation, adding 日文 before each 台词 produced the requested Japanese.
     """
-    starts = []
+    labels = []
     for match in _DIALOGUE.finditer(prompt):
-        if not any('\u3040' <= char <= '\u30ff' for char in match.group(1)):
-            continue
         start = match.start()
-        if prompt[max(0, start - 3):start].endswith(('日文', '日语', '英文', '英语', '中文')):
+        line_prefix = prompt[prompt.rfind('\n', 0, start) + 1:start]
+        if any(language in line_prefix for language in ('日文', '日语', '日本語', '英文', '英语', '中文', '汉语', '漢語')):
             continue
-        starts.append(start)
-    for start in reversed(starts):
-        prompt = prompt[:start] + '日文' + prompt[start:]
+        dialogue = match.group(1)
+        if any('\u3040' <= char <= '\u30ff' for char in dialogue):
+            language = '日文'
+        elif any('\u4e00' <= char <= '\u9fff' for char in dialogue):
+            language = '中文'
+        else:
+            continue
+        labels.append((start, language))
+    for start, language in reversed(labels):
+        prompt = prompt[:start] + language + prompt[start:]
     return prompt
 
 

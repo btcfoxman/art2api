@@ -122,9 +122,24 @@ def test_japanese_dialogue_respects_explicit_language_and_audio_false():
                                  'audio_urls': ['https://media.example/audio']})
     asset = {'file_key': 'audio', 'file_url': request['audio_urls'][0], 'metadata': {'durationMs': 4000}}
     _, inputs, _, _ = quote_input(request, {'audio_urls': [asset]})
-    assert inputs['prompt'] == '@aud1\n@aud1 日文台词：“上に伝えて。”\n@aud1 日文台词：“私もいる。”\n@aud1 台词：“你好。”'
+    assert inputs['prompt'] == '@aud1\n@aud1 日文台词：“上に伝えて。”\n@aud1 日文台词：“私もいる。”\n@aud1 中文台词：“你好。”'
     _, muted, _, _ = quote_input({**request, 'generate_audio': False}, {'audio_urls': [asset]})
     assert muted['prompt'] == '@aud1\n' + prompt.replace('音频1', '@aud1')
+
+
+def test_chinese_dialogue_language_covers_speaker_and_dubbing_labels():
+    request = normalize_request({'model': 'sd-2-5',
+                                 'prompt': ('台词：“我花钱请你当助手。”\n'
+                                            '对白：角色：“怎么过来跟我抢着交卷呢？”\n'
+                                            '配音指令：警卫员：“到家了。”\n'
+                                            '角色说日语的台词：“你好。”\n'
+                                            '台词：“Hello!”')})
+    _, inputs, _, _ = quote_input(request, {})
+    assert inputs['prompt'] == ('中文台词：“我花钱请你当助手。”\n'
+                                '中文对白：角色：“怎么过来跟我抢着交卷呢？”\n'
+                                '中文配音指令：警卫员：“到家了。”\n'
+                                '角色说日语的台词：“你好。”\n'
+                                '台词：“Hello!”')
 
 
 def test_sd25_late_audio_reference_gets_leading_index_without_losing_prompt_or_adding_unused_tags():
